@@ -180,6 +180,9 @@ technical user, born protected (write floor ADMIN):
 @dc.entity(protected=True)          # SHIPPED by datacrystal — you never write it
 class Actor:
     uid: Annotated[int, dc.Unique]
+    subject: Annotated[str, dc.Index] = ""   # external identity key (OIDC sub /
+                                             # SCIM id); uid stays the compact
+                                             # local int used in stamps + labels
     display: str = ""
     human: bool = False
     sponsor: int | None = None      # a natural person's uid; REQUIRED for
@@ -193,6 +196,19 @@ rows are normal records, every sponsorship and membership change is in the
 delta log — "who sponsored 900 on March 3rd?" is answered by the same
 replay as "what did 900 change?". The gate, the actions, and the grants
 share one audit trail.
+
+**External identity: authenticate outside, remember inside.** datacrystal
+is never the identity provider — authentication (SSO/OIDC) stays external,
+and uids may originate there. Two integration points, deliberately
+different: a session's `Principal` may be built **ephemerally** from
+verified auth headers (claims → memberships) — fine for *acting*. But for
+*auditing*, sync-on-login (JIT provisioning / SCIM push): when a verified
+subject first appears or its claims change, upsert its `Actor` row from
+the claims. The upsert is a commit, so the store's own log accumulates the
+membership history most IdPs do not keep — "who held which level on
+March 3rd" stays answerable from the store even when the auth system only
+knows *now*. Sponsorship rarely lives in an IdP; it stays declared here
+(seeded or config-synced), versioned like everything else.
 
 The sponsor is a natural person, never a group (accountability diffuses in
 groups; incident response needs a person to call). This implements the EU
