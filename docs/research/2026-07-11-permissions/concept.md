@@ -1,7 +1,7 @@
 # A lean permission model — labels, floors, stamped commits
 
-_Research concept, 2026-07-11 (round 4 after owner discussion). Nothing here
-is implemented. Origin: LUMEN prototype (agents, curated golden records,
+_Research concept, 2026-07-11 (round 5 after owner review). Nothing here is
+implemented. Origin: LUMEN prototype (agents, curated golden records,
 personal data next to team data). Rides
 [COMMIT-DELTA-v1](../../design/COMMIT-DELTA-v1.md) (proposes a v2); aligns
 with ROADMAP #19 (`datacrystal[ledger]`)._
@@ -24,15 +24,112 @@ the read check is Bell–LaPadula (1973, "no read up"), the write check is
 Biba ("no write up"). Fifty years of audit literature, one integer
 comparison each.
 
-Core knows exactly three things: the in-memory `dc.Principal` (who is
-acting), the permission columns on protected records (what each allows),
-and the `actor` stamp in the delta. Everything else — registries,
-sponsorship, ladder names, review workflows — is application policy,
-collected in [Application-layer patterns](#application-layer-patterns-recommendations-not-core).
+## The public contract — everything you get
+
+Seven names. Everything else in this document is mechanism behind them, or
+optional patterns on top.
+
+1. **`Store.open(path, principal=…)`** — the ambient session identity.
+   **`store.acting_as(uid_or_principal)`** switches it for a scope; given a
+   uid it resolves the shipped registry and enforces the sponsor gate.
+2. **`dc.Principal(uid, memberships)`** — the in-memory subject: who is
+   acting, holding a level per group. Build it from the registry, from
+   config, or from OAuth claims — core does not care where it comes from.
+3. **`dc.Actor`** — the shipped, **fixed** registry entity: one record per
+   human and per technical user (display, `human`, `sponsor`,
+   memberships). One small table per store — **nothing is ever added to
+   your domain models by hand.**
+4. **`@dc.entity(protected=True)`** — the only thing that touches a model:
+   one flag. It injects four private, lib-managed columns (`_dc_owner`,
+   `_dc_groups`, `_dc_read_floor`, `_dc_write_floor`; `init=False`, never
+   in `__init__`) and the read-only `dc_permissions` view.
+5. **`dc.share(rec, group, read=, write=)` · `dc.unshare(rec, group)` ·
+   `dc.protect(rec, read=, write=)`** — the label verbs. They only *stage*
+   changes on the buffered record; enforcement happens at commit, against
+   the session principal.
+6. **`lazy.get()` raises `ReadDeniedError`** (strict path, typename only);
+   **`lazy.get_masked()` never raises** — it returns the record or a
+   `dc.Redacted(typename)` stub (UI path). `PermissionError` rejects a
+   commit whose buffered writes do not clear a write floor.
+7. **Nothing else changes.** `query`/`get`/`get_many`/`incoming`/`count`/
+   search filter implicitly by the session principal; `commit()` stamps
+   and gates implicitly. **Zero new parameters on any existing call.**
+
+## Lead by example
+
+One continuous story — bootstrap to audit:
+
+```python
+# ── 1 · bootstrap: open as the first admin (from app config — someone must
+#        open the store that holds the registry), register the actors
+store = dc.Store.open("data/store",
+                      principal=dc.Principal(uid=1, memberships={ORG: ADMIN}))
+store.store(dc.Actor(uid=2, display="Anna", human=True,
+                     memberships={ORG: STAFF, TEAM_PV: CURATOR}))
+store.store(dc.Actor(uid=900, display="parser swarm", human=False,
+                     sponsor=2,                       # Anna answers for it
+                     memberships={TEAM_PV: AGENT}))
+store.commit()                                        # stamped: actor=1
+
+# ── 2 · protect a class — one flag, the model is otherwise untouched
+@dc.entity(protected=True)
+class Contact:
+    name: str = ""
+
+# ── 3 · anna works: create, share, curate
+with store.acting_as(2):                # uid → registry lookup + sponsor gate
+    c = Contact(name="Meyer Solartechnik GmbH")
+    store.store(c)                      # owner=2, groups=[] — hers alone
+    dc.share(c, TEAM_PV, read=VIEWER, write=AGENT)   # team sees, pipeline enriches
+    dc.protect(c, write=CURATOR)        # ratchet — at most her own level
+    store.commit()                      # stamped: actor=2
+
+# ── 4 · the agent is stopped by the floor …
+with store.acting_as(900):
+    c.name = "Meyer GmbH"
+    store.commit()      # PermissionError: write floor CURATOR(400) > AGENT(100)
+    store.discard()
+
+# ── 5 · … so it files a proposal instead — an ordinary entity YOU define
+@dc.entity(protected=True)
+class Proposal:
+    target: dc.Lazy[Contact] | None = None
+    changes: dict[str, str] = field(default_factory=dict)
+    reason: str = ""
+    status: Annotated[str, dc.Index] = "open"        # open | applied | declined
+
+with store.acting_as(900):
+    p = Proposal(target=dc.Lazy.of(c),
+                 changes={"name": "Meyer GmbH & Co. KG"},
+                 reason="neuer HR-Auszug in Dokument #d41")
+    store.store(p)                      # its own record — always allowed
+    dc.share(p, TEAM_PV, read=VIEWER, write=CURATOR)
+    store.commit()                      # stamped: actor=900
+
+# ── 6 · anna checks and enacts at her level (maker–checker)
+with store.acting_as(2):
+    for p in store.query(dc.fields(Proposal).status == "open"):
+        for f, v in p.changes.items():
+            setattr(p.target.get(), f, v)
+        p.status = "applied"
+    store.commit()      # the log now shows: proposed by 900, changed by 2
+
+# ── 7 · reads are filtered where they run — no new query parameters
+store.query(dc.fields(Contact).name.contains("Meyer"))  # ∧ readable-by-session
+invoice.seller.get()          # denied target → raises ReadDeniedError
+party = invoice.seller.get_masked()      # record, or dc.Redacted("Contact")
+if isinstance(party, dc.Redacted):
+    render_chip("zugriffsbeschränkt")    # the UI never try/excepts
+
+# ── 8 · audit, years later: what did 900 do — and who let it act?
+for tid, actor, at, diff in history(log, oid_of(c)):     # DeltaLog, see Audit
+    ...        # 900 proposed, 2 changed; Actor 900's sponsor grant
+               # is a normal record change in the SAME log
+```
 
 ## Core mechanism
 
-### Principals and levels
+### Principals, actors, levels
 
 ```python
 @dataclass(frozen=True)
@@ -51,10 +148,6 @@ STAFF       = 300
 CURATOR     = 400       # domain experts; may bless and overwrite curated records
 ADMIN       = 500       # administers the store
 EXECUTIVE   = 600       # highest authority over data in the groups they hold
-
-anna   = Principal(uid=2,   memberships={ORG: STAFF, TEAM_PV: CURATOR,
-                                         TEAM_FINANCE: STAFF})
-ollama = Principal(uid=900, memberships={TEAM_PV: AGENT})   # technical user
 ```
 
 - **One increasing number, not flags** — the check is dominance (`>=`), so
@@ -67,36 +160,59 @@ ollama = Principal(uid=900, memberships={TEAM_PV: AGENT})   # technical user
   reproducible and cannot be prompt-injected; an LLM agent is the least
   predictable writer and the biggest exfiltration channel. If an agent
   must read widely, express it on the records (`read_floor=AGENT`), not by
-  raising its rank. Generally: **competence ≠ clearance** — a smarter
-  model is not a grant.
+  raising its rank. Generally: **competence ≠ clearance**.
 - **ADMIN vs EXECUTIVE ordering is not load-bearing** — compartments do
   the real separation (board documents live in a `BOARD` group the admin
   is not in); the ladder only orders trust *within* a shared group.
 - **Membership carries the level**: Anna is CURATOR in the PV team, plain
   STAFF in finance — one person, different hats, no global rank. The
-  anonymous baseline is `Principal(uid=0, memberships={})`, which still
-  holds the implicit `{PUBLIC: VIEWER}`.
+  anonymous baseline `Principal(uid=0, memberships={})` still holds the
+  implicit `{PUBLIC: VIEWER}`.
+
+**`dc.Actor` — the shipped registry.** The delta log records only a number
+(`actor=900`); accountability means that number must resolve, possibly
+years later, to "the parser swarm, a technical user sponsored by Anna,
+holding AGENT in TEAM_PV *at that time*". So the subject side ships as a
+fixed entity — ordinary records in the same store, one per human and per
+technical user, born protected (write floor ADMIN):
+
+```python
+@dc.entity(protected=True)          # SHIPPED by datacrystal — you never write it
+class Actor:
+    uid: Annotated[int, dc.Unique]
+    display: str = ""
+    human: bool = False
+    sponsor: int | None = None      # a natural person's uid; REQUIRED for
+                                    # every non-human actor
+    memberships: dict[int, int] = field(default_factory=dict)
+```
+
+`store.acting_as(uid)` resolves the record and **enforces the sponsor gate
+in core**: a technical user without a sponsor cannot act. Because Actor
+rows are normal records, every sponsorship and membership change is in the
+delta log — "who sponsored 900 on March 3rd?" is answered by the same
+replay as "what did 900 change?". The gate, the actions, and the grants
+share one audit trail.
+
+The sponsor is a natural person, never a group (accountability diffuses in
+groups; incident response needs a person to call). This implements the EU
+AI Act's human-oversight designation — legal duties sit on the
+organization, but Art. 26(2) requires oversight assigned to natural
+persons; Art. 12 record-keeping is the delta log; GoBD asks the same
+attributability. Agent-ness is deliberately *not* a group: groups are
+compartments (*what you may touch*), not types (*what you are*) — an agent
+shares `TEAM_PV` with humans; whether an actor is human lives on its record.
 
 ### Permissions on the record
 
-```python
-@dc.entity(protected=True)      # opt-in facet; injects four PRIVATE columns,
-class Contact:                  # init=False — they never appear in __init__:
-    name: str = ""
-    # _dc_owner:       Annotated[int, dc.Index]        = acting principal's uid
-    # _dc_groups:      Annotated[list[int], dc.Index]  = []  (owner-only: fail closed)
-    # _dc_read_floor:  Annotated[int, dc.SortedIndex]  = VIEWER
-    # _dc_write_floor: Annotated[int, dc.SortedIndex]  = VIEWER
-```
-
-The `_dc_*` columns are storage, not API — private, lib-managed.
-Applications integrate through the sanctioned surface only:
+The `_dc_*` columns are storage, not API — private, lib-managed,
+`init=False`. Applications integrate through the sanctioned surface only:
 
 ```python
-rec.dc_permissions           # computed property -> frozen dc.Permissions struct
-dc.share(rec, TEAM_PV, read=VIEWER, write=AGENT)     # the sanctioned verbs
-dc.protect(rec, write=CURATOR)                       # raise a floor
-child.dc_permissions = parent.dc_permissions         # write-time inheritance
+rec.dc_permissions        # computed property -> frozen dc.Permissions struct
+dc.share(rec, TEAM_PV, read=VIEWER, write=AGENT)
+dc.protect(rec, write=CURATOR)
+child.dc_permissions = parent.dc_permissions      # write-time inheritance
 ```
 
 Nothing is stored twice — the property packages the columns on read and
@@ -130,20 +246,26 @@ def can_write(p, rec) -> bool:              # content AND permission changes
     return authority_towards(p, rec) >= rec._dc_write_floor
 ```
 
-Two deliberate asymmetries: **owners always read their own records** —
-reading your own data is never a question. And **the write floor binds
-everyone, including the owner** — that is the curation guarantee: once a
-curator raised a record's floor, a staff-level owner (or the agent that
-created it) cannot overwrite it; whoever clears the current floor may
-lower it again.
+Deliberate asymmetries: **owners always read their own records** — reading
+your own data is never a question. **The write floor binds everyone,
+including the owner** — the curation guarantee: once a curator raised a
+record's floor, a staff-level owner (or the agent that created it) cannot
+overwrite it; whoever clears the current floor may lower it again.
 
-The write check is a **commit-time gate** in the existing
-consistency-before-commit family (`UniqueViolationError`, dangling-ref
-bridge): a violating buffered write rejects the commit atomically. The
-read check is an **implicit condition** on protected classes, composing as
-bitmap algebra — `owned(p) ∪ ⋃ per (group, level): contains(_dc_groups,
-group) ∧ _dc_read_floor <= level` — one union term per membership, every
-term index-answerable.
+**Who may change permissions themselves?** The verbs stage ordinary writes,
+so two rules cover it: (1) a permission change is gated by the **current**
+write floor like any other write; (2) a new floor may be **at most your
+own authority towards the record** — Anna (CURATOR) can ratchet to
+CURATOR, not to ADMIN. Rule 2 prevents accidental self-lockout and
+protect-beyond-your-reach games; both checks run in the same commit gate.
+
+Enforcement lives in two existing places. The write check is a
+**commit-time gate** in the consistency-before-commit family
+(`UniqueViolationError`, dangling-ref bridge): a violating buffered write
+rejects the commit atomically. The read check is an **implicit condition**
+on protected classes, composing as bitmap algebra — `owned(p) ∪ ⋃ per
+(group, level): contains(_dc_groups, group) ∧ _dc_read_floor <= level` —
+one union term per membership, every term index-answerable.
 
 **Speed is preserved by construction.** The columns ride the same
 bitmap/sorted indexes as every other field: the read filter is one extra
@@ -151,35 +273,6 @@ index intersection per membership, the write gate a handful of integer
 comparisons per buffered record — no join, no second hydration, no
 parallel permission engine on any hot path. (Predicted, not measured; the
 phase-0 pilot should put numbers next to this sentence.)
-
-### Look and feel
-
-```python
-store = dc.Store.open("data/store", principal=anna)
-
-contact = Contact(name="Meyer Solartechnik GmbH")
-store.store(contact)                        # owner=anna, groups=[] — hers alone
-dc.share(contact, TEAM_PV, read=VIEWER, write=AGENT)   # team sees, pipeline enriches
-store.commit()                              # commit stamped: actor uid=2
-
-contact.name = "Meyer Solartechnik GmbH & Co. KG"      # anna curates...
-dc.protect(contact, write=CURATOR)                     # ...and ratchets the floor
-store.commit()
-
-with store.acting_as(ollama):               # the agent pipeline (AGENT in TEAM_PV)
-    contact.name = "Meyer GmbH"
-    store.commit()
-# PermissionError: Contact(oid=42) write floor CURATOR(400); acting principal
-# holds AGENT(100) towards it — commit rejected, nothing persisted.
-
-with store.acting_as(anna):                 # multi-hat: anna is only STAFF here
-    fin = store.get(Account, iban="DE02...")    # TEAM_FINANCE, write floor CURATOR
-    fin.holder = "..."
-    store.commit()                              # PermissionError — STAFF(300) < 400
-
-store.query(dc.fields(Contact).name == "Meyer GmbH")
-# implicitly ∧ readable-by-anna — answered from the same bitmap indexes
-```
 
 ### Audit: COMMIT-DELTA v2 and the DeltaLog
 
@@ -221,25 +314,32 @@ def history(log, oid):
 ```
 
 "Who was granted access, when" is the same loop filtered to permission
-columns. Two operating caveats: deltas are **not retained** unless a
-`DeltaLog` is attached — where audit matters, attach it at store creation
-(or run the ledger); and **rejected commits never appear** — the log
-records what happened, not what was attempted. ROADMAP #19
-(`datacrystal[ledger]`, hash-chained + Merkle) is the tamper-evident tier
-of the same story.
+columns (and to `Actor` records for membership/sponsor grants). Two
+operating caveats: deltas are **not retained** unless a `DeltaLog` is
+attached — where audit matters, attach it at store creation (or run the
+ledger); and **rejected commits never appear** — the log records what
+happened, not what was attempted. ROADMAP #19 (`datacrystal[ledger]`,
+hash-chained + Merkle) is the tamper-evident tier of the same story.
 
-### Denied references: mask on deref, filter on discovery
+### Denied references: strict path and masked path
 
 The one place a reader *notices* the filter: a readable record references
-a restricted one (`invoice.seller` → protected contact). Core stays loud —
-deref raises `ReadDeniedError` carrying only the typename (titles leak);
-core never fabricates stub data. The UX masks: a redacted chip
-(„zugriffsbeschränkt") instead of a phantom gap, enabling the
-ask-the-owner workflow. The rule that keeps masking leak-free: **existence
-is only revealed through a reference you can already read** — *assembled*
-surfaces (query results, search, event threads, `incoming()`) filter
-silently, they would otherwise broadcast existence to holders of no
-reference at all.
+a restricted one (`invoice.seller` → protected contact). Two call forms,
+so neither business logic nor UI code gets exception headaches:
+
+- **Strict — `lazy.get()` raises `ReadDeniedError`** carrying only the
+  typename (titles leak). For code that *expects* access, failure is loud
+  and distinguishable from `DanglingRefError`. Core never fabricates data.
+- **Masked — `lazy.get_masked()` never raises**: the record, or a tiny
+  frozen `dc.Redacted(typename)` stub (falsy, `.typename` for the chip).
+  UI code branches once on `isinstance` — no try/except anywhere. Batch
+  twin: `store.get_many(refs, masked=True)` slots stubs.
+
+The rule that keeps masking leak-free: **existence is only revealed
+through a reference you can already read** — *assembled* surfaces (query
+results, search, event threads, `incoming()`) filter silently, they would
+otherwise broadcast existence to holders of no reference at all. **Mask on
+deref, filter on discovery.**
 
 Nesting follows from write-time inheritance: inline `list`/`dict` values
 share their record's permissions by construction; referenced entities
@@ -249,60 +349,8 @@ split *is* the feature (the mailbox case below).
 
 ## Application-layer patterns (recommendations, not core)
 
-Everything in this section is policy an application builds *on* the
-mechanism — datacrystal ships none of it, and none of it requires core
-changes.
-
-### The actor registry — who is behind a uid
-
-The delta log records only a number: `actor=900`. Accountability means
-that number must resolve — at audit time, possibly years later — to "the
-parser swarm, a technical user sponsored by Anna, holding AGENT in TEAM_PV
-*at that time*". The recommended pattern: store the who-is-who as
-**ordinary records in the same store** — nothing magical:
-
-```python
-@dc.entity(protected=True)     # a normal entity; protected so only ADMIN+ edits it
-class Actor:                   # one record per human and per technical user
-    uid: Annotated[int, dc.Unique]
-    display: str = ""
-    human: bool = False
-    sponsor: int | None = None           # a natural person's uid; required
-                                         # for every non-human actor
-    memberships: dict[int, int] = field(default_factory=dict)
-```
-
-How it works, session start to audit:
-
-1. **Session start** — load the actor's record, enforce the gate, build
-   the in-memory `Principal` from it:
-
-   ```python
-   a = store.get(Actor, uid=900)
-   if not a.human and a.sponsor is None:
-       raise PolicyError("no technical user without an accountable human")
-   session = store.acting_as(Principal(a.uid, a.memberships))
-   ```
-
-2. **Every commit** in that session is stamped `actor=900` by core.
-3. **Audit time** — the DeltaLog shows what 900 did to which records (the
-   `history()` loop above); and because `Actor` rows are themselves normal
-   records, every sponsorship and membership change is *also* in the log —
-   "who sponsored 900 on March 3rd?" is answered by the same replay. The
-   gate, the actions, and the grants share one audit trail.
-
-Bootstrap: the very first admin principal comes from app config — someone
-must open the store that holds the registry.
-
-Sponsor = a natural person, never a group (accountability diffuses in
-groups; incident response needs a person to call). This implements the EU
-AI Act's human-oversight designation — the legal duties sit on the
-organization, but Art. 26(2) requires oversight assigned to natural
-persons; Art. 12 record-keeping is the delta log; GoBD asks the same
-attributability. And note the trap of modelling agent-ness as a group:
-groups are **compartments** (*what you may touch*), not types (*what you
-are*) — an agent shares `TEAM_PV` with humans; whether an actor is human
-is a property of the actor, so it lives on the actor's record.
+Policy an application builds *on* the mechanism. Naming groups, extending
+the ladder, ratcheting rules and review workflows all live here.
 
 ### Maker–checker: review across floors
 
@@ -310,15 +358,15 @@ A staff member or agent discovers something about a curator-maintained
 record. It cannot write — deliberately — but the finding must not be lost.
 The established name (banking dual control) is **maker–checker**
 (Vier-Augen-Prinzip); MLS calls the enacting role a *trusted subject*:
-data crosses an integrity boundary only through a principal cleared for it.
+data crosses an integrity boundary only through a principal cleared for
+it. Steps 5–6 of the walkthrough are the complete pattern:
 
-- **A proposal is a record, not a write** — the maker creates a `Proposal`
-  entity it owns (target ref, suggested values, reason); creating records
-  you own is always allowed.
-- **The checker finds open proposals** via `incoming(target)` or a
-  trigger-style marker and applies the change at their own level. The log
-  shows two entries — proposal by the maker, change by the checker — the
-  maker owns the suggestion, the checker owns the change.
+- **A proposal is a record, not a write** — the maker owns it (target ref,
+  suggested values, reason); creating records you own is always allowed.
+- **The checker finds open proposals** (indexed `status` query, or
+  `incoming(target)`) and applies the change at their own level. The log
+  shows two entries — the maker owns the suggestion, the checker owns the
+  change.
 - **`PermissionError` is the guardrail, never the workflow** — route
   lower-level writers to proposals by design, not by catching exceptions.
 
@@ -327,7 +375,9 @@ instances* (evidence they own), the election machinery re-adopts at
 curator level when strictly richer evidence arrives, flagging
 `needs_review`. Floors complete that convergence model: "parsers never
 touch golden records" becomes store-enforced, evidence keeps flowing
-underneath, election remains the review gate.
+underneath, election remains the review gate. The generic `Proposal`
+entity is the lightweight variant for models without such domain-specific
+evidence machinery.
 
 ### Common labels
 
@@ -345,7 +395,7 @@ The mailbox row is the compartment trick: personal data next to team data
 in one store, invisible to the team, workable by the owner's own agent —
 no special "private" flag, groups already express it.
 
-Ratcheting is app policy too: curation code raises floors explicitly
+Ratcheting is app policy: curation code raises floors explicitly
 (`dc.protect(rec, write=my_level)`). An automatic ratchet on every write
 would let an admin fixing a typo lock a record to ADMIN by accident.
 
@@ -358,7 +408,7 @@ one write re-permissions everything — loses on four counts:
 
 1. **The frequent changes already propagate without touching records** —
    on the *subject* side. "Anna left", "the intern became staff", "revoke
-   the agent" are one registry update, zero object writes, because checks
+   the agent" are one `Actor` update, zero object writes, because checks
    compare against the principal's *current* memberships. The group id
    **is** the shared permission object; records only name it.
 2. **Reclassifying records is rare — and should be per-record.** A floor
@@ -373,7 +423,7 @@ one write re-permissions everything — loses on four counts:
    deliberately does not compile. The escape — denormalizing floors back
    onto records — reintroduces the mass write as cache invalidation plus a
    second hydration per check. Inline small ints on the record's own
-   indexes are what keep permission checks inside the store's existing
+   indexes keep permission checks inside the store's existing
    blazing-fast index machinery.
 4. **Practice agrees at the fast pole.** POSIX mode bits and NTFS ACLs are
    per-object (NTFS's "applying security…" progress bar is the mass write
@@ -419,16 +469,18 @@ embedded object database does this today.
 - **Not a relationship graph** (Zanzibar/SpiceDB) — no policy language, no
   relation tuples. Four fields and two comparisons.
 
-## What would change in datacrystal
+## Implementation notes
 
-1. `dc.Principal` + `Store.open(..., principal=)` + `store.acting_as(p)`.
-2. `@dc.entity(protected=True)`: the four private `_dc_*` columns
-   (`init=False`), the `dc_permissions` property, `dc.share`/`dc.protect`;
-   `store()` defaults owner to the acting principal.
-3. Commit gate: write-floor check per buffered protected entity, atomic
-   rejection (`PermissionError`, consistency-before-commit family).
+1. `dc.Principal`, `dc.Actor` (shipped entity + sponsor gate in
+   `acting_as`), `Store.open(..., principal=)`.
+2. `@dc.entity(protected=True)`: four private `_dc_*` columns
+   (`init=False`), `dc_permissions` property, the verbs; `store()`
+   defaults owner to the acting principal.
+3. Commit gate: write-floor + floor-ceiling checks per buffered protected
+   entity, atomic rejection (`PermissionError`).
 4. Implicit read condition in `query`/`get`/`get_many`/`incoming`/
-   `count`/`explain`; denied deref raises `ReadDeniedError` (typename only).
+   `count`/`explain`; `ReadDeniedError` on strict deref, `get_masked()` /
+   `dc.Redacted` on the masked path.
 5. Snapshots pin the opening principal; FTS post-filters; Arrow mirror
    documented as protected output.
 6. COMMIT-DELTA v2: optional per-delta `actor` + `at`, injectable clock,
@@ -439,20 +491,20 @@ Phasing (each stage useful alone): **0** — pilot app-side in LUMEN
 (permissions as ordinary fields, filter in its query layer, ladder on its
 agents; advisory, throwaway). **1** — principal + actor-stamped commits
 (pure audit, no enforcement risk). **2** — read enforcement everywhere.
-**3** — write gate, grant/revoke helpers, web/federation principals
-(`x-api-key` already authenticates followers), agent delegation
-(acting-on-behalf-of: effective rights = intersection of agent and
-delegating user).
+**3** — write gate, the verbs, web/federation principals (`x-api-key`
+already authenticates followers), agent delegation (acting-on-behalf-of:
+effective rights = intersection of agent and delegating user).
 
 ## Open decisions
 
 - Default floors on protected classes (proposal: fail closed, owner-only,
   floors VIEWER).
 - `count()`/`explain()` post-filter? (Proposal: yes — counts leak.)
-- Per-class `ratchet=True` convenience, or keep ratcheting app-side.
-- Group id registry (ints behind names) — core helper or app convention.
-- Exact sanctioned-verb surface (`dc.share`/`dc.protect` vs property
-  assignment only).
+- Exact floor-ceiling rule (proposal: new floor ≤ own authority towards
+  the record).
+- Group id registry (ints behind names) — shipped constants helper or app
+  convention.
+- Naming of the masked deref (`get_masked()` vs `get(masked=True)`).
 
 ## Prior art
 
