@@ -1,6 +1,6 @@
 # A lean permission model — labels, floors, stamped commits
 
-_Research concept, 2026-07-11 (round 2 after owner discussion). Nothing here
+_Research concept, 2026-07-11 (round 3 after owner discussion). Nothing here
 is implemented. Origin: LUMEN prototype discussion (agents, curated golden
 records, personal data next to team data). Rides
 [COMMIT-DELTA-v1](../../design/COMMIT-DELTA-v1.md) (proposes a v2); aligns
@@ -14,15 +14,30 @@ principal holds a **level per group** — curator in one team, plain staff in
 another. Your authority towards a record is the highest level you hold in
 any group the record is shared with (on records you own, you act at your
 personal-best level). You may **read** the record if that authority clears
-the read floor, **change** it (including its label) only if it clears the
-write floor — so a record maintained by a curator cannot be overwritten by
-an agent, ever. **Who** changed what, when, is not a field on the record:
-every commit is stamped with the acting principal in the commit log.
+the read floor, **change** it (including its permissions) only if it clears
+the write floor — so a record maintained by a curator cannot be overwritten
+by an agent, ever. **Who** changed what, when, is not a field on the
+record: every commit is stamped with the acting principal in the commit log.
 
 Read floor and write floor are the classic confidentiality/integrity pair:
 the read check is Bell–LaPadula (1973, "no read up"), the write check is
 Biba ("no write up"). Fifty years of audit literature, one integer
 comparison each.
+
+## The three layers — what is core, what is app
+
+| | lives | core or app |
+|---|---|---|
+| `dc.Principal` — who is acting | in memory, per session | **core** (the only subject-side thing core knows) |
+| permission columns — what a record allows | on each protected record | **core** (injected, indexed, enforced) |
+| `actor` — who committed | in the delta stream | **core** (COMMIT-DELTA v2) |
+| principal registry, sponsorship, ladder names, group ids | wherever the app wants (in-store records recommended) | **app policy** |
+
+Core never requires a registry: an application may build its `Principal`s
+from three lines of config, from OAuth claims, or from in-store records.
+The in-store registry (below) is the *recommended pattern* because
+membership and sponsorship changes then ride the delta log — audit-native
+history — but it is policy, not mechanism.
 
 ## Principals and levels
 
@@ -84,23 +99,31 @@ oversight design; Art. 12 record-keeping is what the delta log provides).
 GoBD demands the same attributability for anything booking-relevant. The
 lean implementation is a **sponsor** on every non-person principal — a
 natural person, never a group (accountability diffuses in groups; incident
-response needs a person to call):
+response needs a person to call).
+
+Note the trap in modelling agent-ness via group membership ("members of
+the agents group need a sponsor"): groups are **compartments** — *what you
+may touch* — not types. An agent shares `TEAM_PV` with humans; a special
+"agents group" would pollute the compartment namespace and reintroduce a
+kind field through the back door. Whether a principal is a person is a
+property of the principal, so it lives where principals are defined — the
+registry:
 
 ```python
-@dc.entity(protected=True)                 # the registry is itself protected data
-class PrincipalRecord:
+@dc.entity(protected=True)         # app-level pattern; the registry is itself
+class PrincipalRecord:             # protected data in the same store
     uid: Annotated[int, dc.Unique]
-    kind: str                              # "person" | "service" | "agent"
+    kind: str                      # "person" | "service" | "agent"
     display: str = ""
-    sponsor: int | None = None             # uid of a natural person;
-                                           # required unless kind == "person"
+    sponsor: int | None = None     # uid of a natural person;
+                                   # required unless kind == "person"
     memberships: dict[int, int] = field(default_factory=dict)
 
 ollama = PrincipalRecord(uid=900, kind="agent", display="qwen3:4b parser swarm",
                          sponsor=2,                      # Anna answers for it
                          memberships={TEAM_PV: AGENT})
 
-def open_session(store, uid):
+def open_session(store, uid):                    # registry row -> core Principal
     p = store.get(PrincipalRecord, uid=uid)
     if p.kind != "person" and p.sponsor is None:
         raise PolicyError("no principal without an accountable human")
@@ -112,42 +135,89 @@ The audit chain composes: the delta says `actor=900`, the registry says
 records in the same store, every sponsorship or membership change flows
 through the delta log — oversight history is audit-native for free.
 
-## The label — what a protected record carries
+## Permissions on the record
 
 ```python
-@dc.entity(protected=True)      # opt-in facet; injects four NAMESPACED columns:
-class Contact:
+@dc.entity(protected=True)      # opt-in facet; injects four PRIVATE columns,
+class Contact:                  # init=False — they never appear in __init__:
     name: str = ""
-    # dc_owner:       Annotated[int, dc.Index]        = acting principal's uid
-    # dc_groups:      Annotated[list[int], dc.Index]  = []  (owner-only: fail closed)
-    # dc_read_floor:  Annotated[int, dc.SortedIndex]  = VIEWER
-    # dc_write_floor: Annotated[int, dc.SortedIndex]  = VIEWER
+    # _dc_owner:       Annotated[int, dc.Index]        = acting principal's uid
+    # _dc_groups:      Annotated[list[int], dc.Index]  = []  (owner-only: fail closed)
+    # _dc_read_floor:  Annotated[int, dc.SortedIndex]  = VIEWER
+    # _dc_write_floor: Annotated[int, dc.SortedIndex]  = VIEWER
 ```
 
-- **Namespaced (`dc_` prefix)** so they can never collide with domain
-  fields — models legitimately have their own `owner`.
+- **Private, lib-managed columns** (`_dc_` prefix, `init=False`): they are
+  storage, not API. Applications integrate through the surface datacrystal
+  provides — the `dc_permissions` view and helpers — never by poking the
+  columns (single-underscore convention; a same-process app *can* bypass,
+  the shape just makes clear it shouldn't, and permission changes are
+  floor-gated on every path anyway).
 - **Four plain columns, never a packed integer**: Conditions bind fields,
   so a bit-packed sub-field comparison cannot use the bitmap indexes and
   every filtered query would fall to a residual scan. Separate small ints
-  cost 1–2 msgpack bytes each and each gets its own index (`dc_groups`
+  cost 1–2 msgpack bytes each and each gets its own index (`_dc_groups`
   answers membership from the multi-valued bitmap, the floors are
   `SortedIndex` ranges). Pack in memory if you like — never in storage.
-- **`rec.label` is sugar, not storage.** The decorator adds a property
-  that packages the four columns into one frozen struct and writes them
-  back on assignment — permission handling reads as one attribute, the
-  columns stay the indexed truth, nothing is stored twice:
+- **`rec.dc_permissions` — a computed property, the public surface.** It
+  packages the four columns into one frozen `dc.Permissions` struct on
+  read and writes them back on assignment; nothing is stored twice.
+  (MLS literature calls this thing a *security label*; the API uses the
+  plainer name. The property is namespaced too — a domain model may
+  legitimately have its own `permissions` field.)
 
   ```python
-  rec.label                    # Label(owner=2, groups=(TEAM_PV,), read_floor=0,
-                               #       write_floor=400)
-  rec.label = Label(groups=[TEAM_PV], read_floor=VIEWER, write_floor=CURATOR)
-  child.label = parent.label   # write-time inheritance in one line
+  rec.dc_permissions           # Permissions(owner=2, groups=(TEAM_PV,),
+                               #             read_floor=0, write_floor=400)
+  dc.share(rec, TEAM_PV, read=VIEWER, write=AGENT)     # the sanctioned verbs
+  dc.protect(rec, write=CURATOR)                       # raise a floor
+  child.dc_permissions = parent.dc_permissions         # write-time inheritance
   ```
 
   (Vocabulary kept sharp on purpose: a **Principal** is the subject — who
-  acts; the **Label** is what a record carries. They are different things.)
+  acts; **Permissions** are what a record carries. Different things.)
 
 Unprotected classes are untouched: no fields injected, no checks, zero cost.
+
+### Why inline columns, not a reference to a shared permission object
+
+The obvious alternative: records point at a shared `Permissions` entity,
+so changing that one object re-permissions everything referencing it —
+no mass transaction. The concern is valid; the design still says inline,
+for four reasons:
+
+1. **The frequent changes already propagate without touching records** —
+   on the *subject* side. "Anna left the team", "the intern became staff",
+   "revoke the agent" are registry updates: one record, zero object
+   writes, because checks compare against the principal's *current*
+   memberships. The group id **is** the shared permission object — what a
+   group means is centrally mutable; records only name it.
+2. **Reclassifying records is rare — and should be per-record.** A floor
+   is the record's *classification*, not shared policy. MLS calls label
+   stability *tranquility*: one write to a shared object silently
+   re-classifying 100k records is an audit smell (the log would show one
+   innocent-looking change; inline, the log names exactly which records
+   changed classification, with priors).
+3. **Indirection breaks the fast path.** Conditions bind one class; a
+   read filter over floors living on a referenced entity is a cross-entity
+   join datacrystal deliberately does not compile. The escape is
+   denormalizing the floors back onto the records — which reintroduces
+   the mass write as a cache-invalidation obligation, plus a second
+   record hydrated per check. The indirection does not remove the big
+   transaction; it hides it and adds a consistency liability.
+4. **Common practice spans both poles, and the fast pole is inline.**
+   POSIX mode bits and NTFS ACLs are per-object (NTFS's "applying
+   security…" progress bar is the mass write made visible — and NTFS
+   still chose it); Postgres RLS is the hybrid that validates this
+   design — policies are predicates over *inline row columns*; Zanzibar
+   is full indirection and needs a dedicated global service with its own
+   caching indexes to stay fast — the price of indirection at check time.
+
+Mass relabels stay possible and honest: `query_iter` + chunked commits
+(the standard bulk recipe), each record's change logged with its prior. If
+a genuinely shared floor policy ever emerges, the pattern is a `policy`
+column plus floors re-stamped by a maintenance job (the `layer_types`
+pattern) — `[demand-driven, not v1]`.
 
 ## The checks
 
@@ -156,16 +226,16 @@ def authority_towards(p: Principal, rec) -> int:
     """Highest level p holds in any group rec is shared with; owners act
     at their personal-best level on their own records."""
     levels = [lvl for grp, lvl in p.memberships.items()
-              if grp in rec.dc_groups]
-    if rec.dc_owner == p.uid:
+              if grp in rec._dc_groups]
+    if rec._dc_owner == p.uid:
         levels.append(max(p.memberships.values(), default=VIEWER))
     return max(levels, default=NO_STANDING)
 
 def can_read(p, rec) -> bool:
-    return rec.dc_owner == p.uid or authority_towards(p, rec) >= rec.dc_read_floor
+    return rec._dc_owner == p.uid or authority_towards(p, rec) >= rec._dc_read_floor
 
-def can_write(p, rec) -> bool:              # content AND label changes
-    return authority_towards(p, rec) >= rec.dc_write_floor
+def can_write(p, rec) -> bool:              # content AND permission changes
+    return authority_towards(p, rec) >= rec._dc_write_floor
 ```
 
 Two deliberate asymmetries:
@@ -185,14 +255,14 @@ store = dc.Store.open("data/store", principal=anna)
 
 contact = Contact(name="Meyer Solartechnik GmbH")
 store.store(contact)                    # owner=anna, groups=[] — hers alone
-contact.label = Label(groups=[TEAM_PV],
-                      read_floor=VIEWER,        # every team member sees it
-                      write_floor=AGENT)        # pipeline may enrich it
+dc.share(contact, TEAM_PV,
+         read=VIEWER,                   # every team member sees it
+         write=AGENT)                   # pipeline may enrich it
 store.commit()                          # commit stamped: actor uid=2
 
 # curation: anna (CURATOR in TEAM_PV) blesses the record
 contact.name = "Meyer Solartechnik GmbH & Co. KG"
-contact.dc_write_floor = CURATOR        # ratchet — she clears it, so she may set it
+dc.protect(contact, write=CURATOR)      # ratchet — she clears it, so she may raise it
 store.commit()
 
 # later, the agent pipeline acts as `ollama` (AGENT in TEAM_PV)
@@ -218,13 +288,13 @@ consistency-before-commit family (`UniqueViolationError`, dangling-ref
 bridge): a violating buffered write rejects the commit atomically, the
 store stays healthy. The read filter is an **implicit condition** on
 protected classes; it composes as bitmap algebra —
-`owned(p) ∪ ⋃ per (group, level): contains(dc_groups, group) ∧
-dc_read_floor <= level` — one union term per membership, every term
+`owned(p) ∪ ⋃ per (group, level): contains(_dc_groups, group) ∧
+_dc_read_floor <= level` — one union term per membership, every term
 index-answerable, so protected queries stay indexed, never residual.
 
 ## Common cases
 
-| case | label |
+| case | permissions |
 |---|---|
 | private note | `owner=anna, groups=[]` — nobody else sees it exists |
 | team document, pipeline-enriched | `groups=[TEAM_PV], read=VIEWER, write=AGENT` |
@@ -239,9 +309,9 @@ data in one store, invisible to the team, yet the owner's own agent can
 work on it — no special "private" flag needed, groups already express it.
 
 Ratcheting stays **app policy, not core mechanism**: curation code raises
-the floor explicitly (`rec.dc_write_floor = max(rec.dc_write_floor,
-my_level)`). An automatic ratchet on every write would let an admin fixing
-a typo lock a record to ADMIN by accident.
+the floor explicitly (`dc.protect(rec, write=my_level)`). An automatic
+ratchet on every write would let an admin fixing a typo lock a record to
+ADMIN by accident.
 
 ## Maker–checker: review across floors
 
@@ -315,13 +385,13 @@ def history(log, oid):
                 f: (old.get(f), new.get(f))
                 for f in old.keys() | new.keys() if old.get(f) != new.get(f)}
 
-# 5   2 (anna)  {'name': (None, 'Meyer Solartechnik GmbH'), 'dc_owner': (None, 2)}
-# 9   2 (anna)  {'name': ('… GmbH', '… & Co. KG'), 'dc_write_floor': (100, 400)}
+# 5   2 (anna)  {'name': (None, 'Meyer Solartechnik GmbH'), '_dc_owner': (None, 2)}
+# 9   2 (anna)  {'name': ('… GmbH', '… & Co. KG'), '_dc_write_floor': (100, 400)}
 ```
 
 "Who was granted access, when" is the same loop filtered to diffs touching
-the label fields. Two operating caveats: deltas are **not retained** unless
-a `DeltaLog` is attached — where audit matters, attach it at store
+the permission columns. Two operating caveats: deltas are **not retained**
+unless a `DeltaLog` is attached — where audit matters, attach it at store
 creation (or run the ledger); and **rejected commits never appear** — the
 log records what happened, not what was attempted (attempted-violation
 telemetry is app-side, parked as nice-to-have).
@@ -351,11 +421,11 @@ reference to one they may not (`invoice.seller` → restricted contact).
   reference at all. **Mask on deref, filter on discovery.**
 
 Nesting follows from this plus write-time inheritance: inline `list`/
-`dict` values share their record's label by construction; referenced
-entities each carry their own label (sub-permissions come naturally); new
-children default to their container's label, so whole aggregates stay
-coherent unless divergence is deliberate (the mailbox-layer case). Apps
-should keep aggregates label-coherent except where the split *is* the
+`dict` values share their record's permissions by construction; referenced
+entities each carry their own (sub-permissions come naturally); new
+children default to their container's permissions, so whole aggregates
+stay coherent unless divergence is deliberate (the mailbox-layer case).
+Apps should keep aggregates coherent except where the split *is* the
 feature — a readable dossier with an unreadable `primary_model` is
 confusing UX.
 
@@ -379,14 +449,14 @@ No embedded object database does this today.
   confused-deputy protection for app code, correct multi-principal behavior
   on the surfaces that already exist (web extra, followers, agents), and a
   native audit trail. State it like the durability triad — honestly.
-- **Not field-level.** Labels sit on records; sensitivity inside a record
-  is expressed by decomposing into entities (LUMEN's layers already do
-  this: a public document node, a restricted Contact layer).
+- **Not field-level.** Permissions sit on records; sensitivity inside a
+  record is expressed by decomposing into entities (LUMEN's layers already
+  do this: a public document node, a restricted Contact layer).
 - **Not read-time sub-graph inheritance.** An object graph has multiple
   referrers — "the parent" is ambiguous and O(path) per check. Inheritance
-  happens at *write time* (a new child defaults to its container's label);
-  labels stay stable, which is what makes them auditable (MLS calls this
-  tranquility).
+  happens at *write time* (a new child defaults to its container's
+  permissions); they stay stable, which is what makes them auditable (MLS
+  calls this tranquility).
 - **Not Bell–LaPadula ★-property** (no-write-down) — that is the part of
   MLS that makes systems miserable, and it serves a leak-prevention threat
   model this store cannot honor anyway.
@@ -397,9 +467,10 @@ No embedded object database does this today.
 
 1. `dc.Principal` + `Store.open(..., principal=)` and a
    `store.acting_as(p)` context for services handling several principals.
-2. `@dc.entity(protected=True)` injects the four namespaced indexed label
-   columns plus the `label` property; `store()` defaults owner to the
-   acting principal.
+2. `@dc.entity(protected=True)` injects the four private `_dc_*` columns
+   (`init=False` — never in `__init__`), the `dc_permissions` property,
+   and the `dc.share`/`dc.protect` helpers; `store()` defaults owner to
+   the acting principal.
 3. Commit gate: write-floor check per buffered protected entity, rejecting
    atomically (`PermissionError`, consistency-before-commit family).
 4. Implicit read condition on protected classes in `query`/`get`/
@@ -412,12 +483,12 @@ No embedded object database does this today.
 7. Unprotected classes: nothing changes, zero cost.
 
 Phasing (each stage useful alone): **0** — pilot the model app-side in
-LUMEN (labels as ordinary fields, filter in its query layer, ladder on its
-agents; advisory, throwaway). **1** — principal + actor-stamped commits
-(pure audit, no enforcement risk). **2** — read enforcement everywhere.
-**3** — write gate, grant/revoke helpers, web/federation principals
-(`x-api-key` already authenticates followers — authorization gives it
-teeth), agent delegation (acting-on-behalf-of: effective rights =
+LUMEN (permissions as ordinary fields, filter in its query layer, ladder
+on its agents; advisory, throwaway). **1** — principal + actor-stamped
+commits (pure audit, no enforcement risk). **2** — read enforcement
+everywhere. **3** — write gate, grant/revoke helpers, web/federation
+principals (`x-api-key` already authenticates followers — authorization
+gives it teeth), agent delegation (acting-on-behalf-of: effective rights =
 intersection of agent and delegating user).
 
 ## Open decisions
@@ -428,7 +499,8 @@ intersection of agent and delegating user).
 - Per-class `ratchet=True` convenience, or keep ratcheting purely app-side.
 - Group id registry (ints behind names) — core helper or app convention
   (the `PrincipalRecord` sketch above leans app-side, in-store).
-- Ship the `Label` view property in v1 or defer (pure sugar, droppable).
+- Exact sanctioned-verb surface (`dc.share`/`dc.protect` vs property
+  assignment only).
 
 ## Prior art
 
