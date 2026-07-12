@@ -135,7 +135,7 @@ datacrystal is single-writer by design — so how does it reach the edge without
 multi-writer system it explicitly is *not*? Through the **fractal** shape ratified in
 [VISION.md](design/VISION.md): every node is *the same datacrystal*. A follower
 (`Store.follower(url)`) is not a thin client or a cache in front of a remote database — it is a
-**real local store** that bootstraps by replaying the coordinator's COMMIT-DELTA-v1 stream and then
+**real local store** that bootstraps by replaying the coordinator's COMMIT-DELTA-v2 stream and then
 reads at full local speed, no per-call round-trips. The coordinator is just an ordinary single-writer
 store with its change-feed served over HTTP; "coordinator" is a *role*, not a different kind of store.
 

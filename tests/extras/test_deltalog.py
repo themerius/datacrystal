@@ -274,3 +274,46 @@ def test_not_a_delta_log_dir_refuses(tmp_path) -> None:
 def test_bad_flush_every_refused(tmp_path) -> None:
     with pytest.raises(DeltaLogConfigError):
         DeltaLog(tmp_path / "x.deltalog", flush_every=0)
+
+
+def test_replay_exposes_who_changed_what_when(store_factory, tmp_path) -> None:
+    """The audit walk (epic #168 W1): every commit through an attached log is
+    stamped with the COMMITTING principal + the clock, and the concept doc's
+    history() recipe — field-level who/when diffs from payload+prior — runs
+    on nothing but replay(). This is 'pure audit' end to end; without an
+    attached consumer NOTHING records the actor (deltas are not retained)."""
+    store = store_factory()
+    store._clock = lambda: 1_700_000_000_000_000_000  # the private seam, pinned
+    log = fresh_log(tmp_path)
+    store.attach(log)
+
+    with store.acting_as(dc.Principal(uid=2)):       # anna creates
+        store.store(dc.Actor(uid=2, display="Anna", human=True))
+        cab = Cabinet(qid="Q1", name="drawer 7")
+        store.store(cab)
+        store.commit()
+    with store.acting_as(dc.Principal(uid=900)):     # the swarm edits
+        cab.name = "drawer 7 (oxides)"
+        store.commit()
+    store.store(Cabinet(qid="Q2", name="drawer 8"))  # outside any scope
+    store.commit()
+
+    deltas = list(log.replay())
+    assert [d["actor"] for d in deltas] == [2, 900, 0]
+    assert all(d["at"] == 1_700_000_000_000_000_000 for d in deltas)
+
+    # the history() recipe: who changed the record, from payload vs prior
+    target_oid = next(
+        op["oid"] for op in deltas[0]["ops"]
+        if op["prior"] is None and b"drawer 7" in op["payload"]
+    )
+    edits = [
+        (delta["tid"], delta["actor"])
+        for delta in deltas
+        for op in delta["ops"]
+        if op["oid"] == target_oid and op["prior"] is not None
+    ]
+    assert edits == [(2, 900)]  # tid 2, by actor 900 — who/when in one walk
+    fetched = store.get(Cabinet, qid="Q1")
+    assert fetched is not None and fetched.name == "drawer 7 (oxides)"
+    store.close()

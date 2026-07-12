@@ -4,8 +4,8 @@ Goal: read committed state from a worker thread without touching the live graph 
 attach a consumer that sees every commit (the commit-delta pipeline), and keep a durable audit
 history (the delta log). The dry contract for [snapshots](../reference.md#snapshots) and
 [the commit-delta pipeline](../reference.md#the-commit-delta-pipeline) lives in the reference; this
-is how to put them to work. The pipeline is the COMMIT-DELTA-v1 contract
-([locked](../design/COMMIT-DELTA-v1.md)); cross-thread reads rest on
+is how to put them to work. The pipeline is the COMMIT-DELTA-v2 contract
+([locked](../design/COMMIT-DELTA-v2.md)); cross-thread reads rest on
 [ADR-002 read views](../design/ADR-002-storage-read-views.md).
 
 ## Read from any thread with store.snapshot()
@@ -35,7 +35,7 @@ The web extra builds its whole read path on snapshots (pooled per watermark) —
 ## Attach a consumer to the commit-delta pipeline
 
 Every commit is describable as one versioned, msgpack-encodable **delta** — the public
-COMMIT-DELTA-v1 contract. Attach a consumer and every commit hands it exactly one delta, in TID
+COMMIT-DELTA-v2 contract. Attach a consumer and every commit hands it exactly one delta, in TID
 order, on the owner thread, strictly after the commit is durable:
 
 ```python
