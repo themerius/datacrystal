@@ -85,6 +85,40 @@ def test_head_and_deltas_serve_the_wire(store_factory, tmp_path) -> None:
         store.close()
 
 
+def test_stamps_cross_the_wire_and_bootstrap(store_factory, tmp_path) -> None:
+    """W1-7 (epic #168): actor/at cross the wire inside unchanged frames.
+
+    A coordinator committing under ``acting_as`` serves stamped v2 deltas;
+    the frame layout is untouched (FEDERATION-WIRE-v1 — the wire doc's dated
+    amendment records only the carried contract version advancing) and a
+    follower bootstraps from the stamped stream unchanged.
+    """
+    store = store_factory()
+    log = DeltaLog(tmp_path / "deltalog")
+    store.attach(log)
+    with store.acting_as(dc.Principal(uid=2)):
+        store.store(Mineral(qid="Q7", name="Azurite"))
+        assert store.commit() is not None
+    store.store(Mineral(qid="Q8", name="Topaz"))  # outside the scope → anonymous
+    store.commit()
+    try:
+        app = FastAPI()
+        app.include_router(federation_router(store, log))
+        with TestClient(app) as client:
+            deltas = _parse_frames(
+                client.get("/v1/deltas", params={"after": 0}).content
+            )
+            assert [d["actor"] for d in deltas] == [2, 0]
+            assert all(isinstance(d["at"], int) for d in deltas)
+            follower = dc.Store.follower("http://coord", client=client)
+            try:
+                assert {m.qid for m in follower.query(Mineral)} == {"Q7", "Q8"}
+            finally:
+                follower.close()
+    finally:
+        store.close()
+
+
 def test_read_routes_are_async(store_factory, tmp_path) -> None:
     """``/v1/head`` and ``/v1/deltas`` MUST be ``async def`` (#149 peer-review fix).
 

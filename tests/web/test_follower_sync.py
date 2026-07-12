@@ -17,7 +17,11 @@ from fastapi.testclient import TestClient
 from datacrystal._follower import _apply_catchup, _bootstrap_backend, open_follower
 from datacrystal._storage.memory import MemoryBackend
 from datacrystal._store import Store
-from datacrystal.contract.applier import DeltaGapError
+from datacrystal.contract.applier import (
+    CONTRACT_VERSION,
+    DeltaFormatError,
+    DeltaGapError,
+)
 from datacrystal.deltalog import DeltaLog
 from datacrystal.web import federation_router
 from tests.conftest import Mineral
@@ -206,3 +210,25 @@ def test_discard_unblocks_sync(tmp_path) -> None:
                 follower.close()
     finally:
         coord.close()
+
+
+def test_catchup_refuses_wrong_contract_versions() -> None:
+    """The sync path fails as loudly as bootstrap (COMMIT-DELTA-v2 §4.5).
+
+    Pre-W1, ``_apply_catchup`` applied frames with NO version check — an old
+    follower would have silently applied a newer coordinator's deltas on
+    catch-up. Pinned closed: exact-version refusal in both directions, plus
+    the format-marker check, all BEFORE the backend is touched.
+    """
+    stamped = {
+        "f": "datacrystal-delta", "v": CONTRACT_VERSION, "tid": 1,
+        "actor": 0, "at": 0, "types": [], "ops": [], "root": None,
+    }
+    with pytest.raises(DeltaFormatError, match="predates"):
+        _apply_catchup(MemoryBackend(), [{**stamped, "v": 1}])
+    with pytest.raises(DeltaFormatError, match="newer"):
+        _apply_catchup(MemoryBackend(), [{**stamped, "v": CONTRACT_VERSION + 1}])
+    with pytest.raises(DeltaFormatError, match="not a datacrystal delta"):
+        _apply_catchup(MemoryBackend(), [{**stamped, "f": "something-else"}])
+    # the well-formed empty delta still applies (the guard refuses, never breaks)
+    assert _apply_catchup(MemoryBackend(), [stamped]) == 1
