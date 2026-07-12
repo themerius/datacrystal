@@ -32,6 +32,7 @@ import threading
 import warnings
 from collections import deque
 from contextlib import contextmanager
+from contextvars import ContextVar
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import TracebackType
@@ -279,8 +280,15 @@ class Store:
         # identity is config-trusted — someone must open the store that holds
         # the Actor registry, so bootstrap cannot resolve through it.
         # acting_as() pushes scoped identities on top; uid 0 = anonymous.
+        # A ContextVar, not a plain stack: under aopen() an acting_as scope
+        # would otherwise leak across awaits into interleaved tasks on the
+        # same loop — contextvars make the scope task-confined by
+        # construction (each task sees its own stack), which is exactly the
+        # per-request identity the web tier composes on later (W2+).
         self._principal = principal if principal is not None else Principal(uid=0)
-        self._acting: list[Principal] = []
+        self._acting: ContextVar[tuple[Principal, ...]] = ContextVar(
+            "datacrystal-acting", default=()
+        )
         # COMMIT-DELTA-v1 consumers (ROADMAP item 3). Commits build and
         # deliver deltas only while this list is non-empty — an unwatched
         # store pays nothing for the pipeline (spec §5).
@@ -499,8 +507,13 @@ class Store:
         ``uid=0`` principal if none was given). Commits are stamped with this
         principal's uid (COMMIT-DELTA-v2): the stamp is the **committing**
         identity — writes buffered under A and committed under B stamp B.
+
+        Under ``aopen()`` the scope is **task-confined** (contextvars): an
+        ``acting_as`` held across an ``await`` never leaks into interleaved
+        tasks on the same loop — each task acts as itself.
         """
-        return self._acting[-1] if self._acting else self._principal
+        stack = self._acting.get()
+        return stack[-1] if stack else self._principal
 
     @contextmanager
     def acting_as(self, subject: int | Principal) -> Generator[Principal]:
@@ -543,11 +556,11 @@ class Store:
                     "the natural person who answers for it"
                 )
             principal = Principal(uid=actor.uid, memberships=dict(actor.memberships))
-        self._acting.append(principal)
+        token = self._acting.set((*self._acting.get(), principal))
         try:
             yield principal
         finally:
-            self._acting.pop()
+            self._acting.reset(token)
 
     # -- lifecycle -----------------------------------------------------------
 
