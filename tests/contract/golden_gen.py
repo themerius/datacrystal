@@ -56,10 +56,18 @@ class _Collector:
         return True
 
 
+# The pinned v2 stamps (COMMIT-DELTA-v2 §5 / fitness #5 as amended): the
+# stream is byte-deterministic GIVEN the same injected clock and the same
+# acting principal — so the generator injects both.
+PINNED_AT_NS = 1_700_000_000_000_000_000
+PINNED_ACTOR = dc.Principal(uid=2)  # a fixed non-anonymous stamp
+
+
 def stream() -> list[bytes]:
     """The scripted session → the emitted deltas' wire bytes."""
     collector = _Collector()
-    store = dc.Store._from_backend(MemoryBackend())
+    store = dc.Store._from_backend(MemoryBackend(), principal=PINNED_ACTOR)
+    store._clock = lambda: PINNED_AT_NS  # the private clock seam, pinned
     store.attach(collector)
 
     # tid 1: a small cyclic-ish graph with a Lazy ref and containers

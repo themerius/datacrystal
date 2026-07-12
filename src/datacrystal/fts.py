@@ -293,10 +293,15 @@ class FullTextIndex:
     def apply(self, delta: dict[str, Any]) -> bool:
         if delta.get("f") != FORMAT_MARKER:
             raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
-        if delta["v"] > CONTRACT_VERSION:
+        if delta["v"] != CONTRACT_VERSION:
+            if delta["v"] > CONTRACT_VERSION:
+                raise DeltaFormatError(
+                    f"delta version {delta['v']} is newer than this index "
+                    f"supports ({CONTRACT_VERSION}); upgrade datacrystal[fts]"
+                )
             raise DeltaFormatError(
-                f"delta version {delta['v']} is newer than this index "
-                f"supports ({CONTRACT_VERSION}); upgrade datacrystal[fts]"
+                f"delta version {delta['v']} predates v{CONTRACT_VERSION} — "
+                "incompatible (COMMIT-DELTA-v2 §7, no-compat): rebuild the index"
             )
         tid = delta["tid"]
         if tid <= self._watermark:

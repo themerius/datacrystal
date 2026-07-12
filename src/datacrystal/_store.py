@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import io
 import threading
+import time
 import warnings
 from collections import deque
 from contextlib import contextmanager
@@ -289,6 +290,11 @@ class Store:
         self._acting: ContextVar[tuple[Principal, ...]] = ContextVar(
             "datacrystal-acting", default=()
         )
+        # The v2 `at` stamp's clock — int nanoseconds, injectable (a PRIVATE
+        # seam per ADR-008 batch 1: goldens/vectors/fitness pin it; the
+        # public API stays clock-free). Wall clocks step and skew, so TID
+        # remains the only ordering truth (COMMIT-DELTA-v2 §5).
+        self._clock: Callable[[], int] = time.time_ns
         # COMMIT-DELTA-v1 consumers (ROADMAP item 3). Commits build and
         # deliver deltas only while this list is non-empty — an unwatched
         # store pays nothing for the pipeline (spec §5).
@@ -1355,7 +1361,8 @@ class Store:
             ],
         )
         delta = (
-            build_delta(tid, records, new_types, self._root_oid, priors, delete_ops)
+            build_delta(tid, records, new_types, self._root_oid, priors, delete_ops,
+                        actor=self.principal.uid, at=self._clock())
             if self._consumers
             else None
         )

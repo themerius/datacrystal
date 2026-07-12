@@ -47,13 +47,20 @@ def build_delta(tid: int, records: list[StoredRecord],
                 new_types: list[tuple[int, str, list[str]]],
                 root_oid: int | None,
                 priors: dict[int, bytes],
-                deletes: Sequence[tuple[int, int, bytes]] = ()) -> dict[str, Any]:
-    """Assemble one COMMIT-DELTA-v1 map (spec §2/§3) from P1's capture.
+                deletes: Sequence[tuple[int, int, bytes]] = (), *,
+                actor: int, at: int) -> dict[str, Any]:
+    """Assemble one COMMIT-DELTA-v2 map (spec §2/§3) from P1's capture.
 
     Upsert ops come first, in capture order (``priors`` maps OID → previous
     payload; absent key = created in this commit), then delete tombstones in
     deletion order as ``(oid, cid, last payload)`` triples (spec §3.1) —
     one OID never appears in both (ADR-003 precedence).
+
+    ``actor``/``at`` are the v2 audit stamps — REQUIRED keys of every delta
+    (always-stamp-both, ADR-008 batch 1): the committing principal's uid
+    (0 = anonymous) and the commit instant in int nanoseconds from the
+    store's injectable clock. Keyword-only and defaultless on purpose — a
+    call site that forgets them must not compile into an unstamped delta.
     """
     ops: list[dict[str, Any]] = [
         {
@@ -73,6 +80,8 @@ def build_delta(tid: int, records: list[StoredRecord],
         "f": FORMAT_MARKER,
         "v": CONTRACT_VERSION,
         "tid": tid,
+        "actor": actor,
+        "at": at,
         "ops": ops,
         "types": [[cid, typename, list(fields)] for cid, typename, fields in new_types],
         "root": root_oid,
