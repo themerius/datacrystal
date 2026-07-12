@@ -689,6 +689,23 @@ store.commit()                             # stamped: actor=1
 - `Actor.sponsor` names a natural person's uid and is **required for every non-human
   actor** — `store.acting_as()` enforces the gate (a technical user without a sponsor
   cannot act).
+- `store.acting_as(uid_or_principal)` switches the session identity for a scope, and
+  `store.principal` reads the one in effect:
+
+  ```python
+  with store.acting_as(900):        # uid → registry lookup + sponsor gate
+      c.name = "Meyer GmbH"
+      store.commit()                # stamped: actor=900
+
+  claims = dc.Principal(uid=41, memberships={TEAM: dc.STAFF})   # from OIDC claims
+  with store.acting_as(claims):     # ephemeral principal — no registry row needed
+      store.commit()                # stamped: actor=41
+  ```
+
+  Scopes nest (innermost wins); the stamp is the **committing** identity — writes
+  buffered under A but committed under B stamp B. A uid that resolves to a non-human
+  `Actor` without a sponsor raises `SponsorRequiredError`; an unregistered uid raises
+  `UnknownActorError`.
 - W1 ships **identity + stamps only**: no permission is checked anywhere yet. Floors and
   enforcement are `[planned — Permissions W2–W4]` (see the campaign milestone).
 
@@ -1081,6 +1098,8 @@ Everything derives from `dc.DataCrystalError`:
 | `UniqueViolationError` | duplicate value for a `dc.Unique` field in a commit |
 | `SchemaMismatchError` | a class change beyond additive evolution (see [the schema-evolution how-to](how-to/schema-evolution.md)) |
 | `SchemaSkewError` | a federated `/v1/submit` contribution carries a field the coordinator's class lacks (cid-lineage skew → HTTP 409; [FEDERATION-WIRE-v1](design/FEDERATION-WIRE-v1.md)) |
+| `UnknownActorError` | `store.acting_as(uid)` found no `dc.Actor` row with that uid — register the actor, or pass a `dc.Principal` built from verified auth claims |
+| `SponsorRequiredError` | `acting_as(uid)` resolved a non-human actor with no `sponsor` — every technical user names a natural person who answers for it (the sponsor gate) |
 | `ConflictError` | a federated `/v1/submit` OCC base token no longer matches the coordinator's current payload — the entity moved since it was read (→ HTTP 409; re-read and retry, never last-writer-wins). Carries `.key`, `.expected_base`, `.actual_base` (the conflict envelope) so a client can drive its re-read; `store.committing()` handles the retry for you |
 | `UnregisteredTypeError` | store has records of a class not imported in this process |
 | `NewerStoreError` | store written by a newer format version |
