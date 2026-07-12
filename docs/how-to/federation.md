@@ -10,7 +10,7 @@ This is datacrystal's replication shape (ROADMAP item 21,
 `pip install 'datacrystal[web]'` on the coordinator; a follower additionally needs an HTTP transport
 and the contribute serializer (`pip install 'datacrystal[follower]'`). The wire is **three HTTP
 shapes** under `/v1`: `GET /v1/head` (the watermark probe), `GET /v1/deltas?after=<tid>` (the
-COMMIT-DELTA-v1 change-feed), and `POST /v1/submit` (contribute). A follower talks only those — it
+COMMIT-DELTA-v2 change-feed), and `POST /v1/submit` (contribute). A follower talks only those — it
 never touches the coordinator's process directly.
 
 ## The coordinator: a store + a delta log + the federation router

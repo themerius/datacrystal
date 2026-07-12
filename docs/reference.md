@@ -755,9 +755,10 @@ def report(store: dc.Store) -> int:        # runs on any thread
 ## The commit-delta pipeline
 
 Every commit is describable as one versioned, msgpack-encodable **delta** — the public
-[COMMIT-DELTA-v1](design/COMMIT-DELTA-v1.md) contract (**LOCKED v1**, 2026-06-12). Attach
-a consumer and every commit hands it exactly one delta, in TID order, on the owner thread,
-strictly after the commit is durable:
+[COMMIT-DELTA-v2](design/COMMIT-DELTA-v2.md) contract (**LOCKED v2**, 2026-07-12; v1 retired
+under the no-compat cut — pre-v2 retained logs are recreated, and every consumer accepts
+exactly `v == 2`, refusing older and newer loudly). Attach a consumer and every commit hands
+it exactly one delta, in TID order, on the owner thread, strictly after the commit is durable:
 
 ```python
 with store.snapshot() as snap:                  # 1. bootstrap at a watermark
@@ -772,6 +773,13 @@ store.attach(consumer)                          # 2. ride the stream from there
 - Update ops carry the record's **prior payload**, so index-shaped consumers un-index old
   values without ever reading the store; `store.delete()` emits **delete tombstones**
   (`payload` nil, `prior` = the last payload) through the same channel.
+- Every v2 delta carries the **audit stamps** `actor` (the committing principal's uid, `0` =
+  anonymous — see [Actors and principals](#actors-and-principals)) and `at` (int ns, an
+  engine-internal clock; TID stays the only ordering truth). Stamps are metadata, never data:
+  derived state and replay digests are stamp-independent by construction. **The caveat that
+  makes "pure audit" honest**: with no consumer attached, *nothing records the actor* — deltas
+  are built only while watched and never retained, so where audit matters, attach a `DeltaLog`
+  at store creation; `log.replay()` then answers "who changed what, when" from watermark 0.
 - A consumer that raises is **detached** with a `ConsumerDetachedWarning` — the commit
   stays durable, the store stays healthy, the sidecar rebuilds and re-attaches.
 - Writing a consumer? Implement the `dc.DeltaConsumer` protocol (a `watermark` property plus
@@ -852,7 +860,7 @@ from datacrystal.web import (
 - **`federation_router(store, deltalog, *, dependencies=None)`** — builds a FastAPI `APIRouter`
   (prefix `/v1`) exposing the coordinator's **read** surface to edge followers:
   `GET /v1/head` → `{tid, format, version}` (the watermark probe) and
-  `GET /v1/deltas?after=<tid>` → the COMMIT-DELTA-v1 frames with `tid > after`, in strict TID order,
+  `GET /v1/deltas?after=<tid>` → the COMMIT-DELTA-v2 frames with `tid > after`, in strict TID order,
   byte-for-byte the length-prefixed frame the `DeltaLog` writes (re-encoded from `deltalog.replay`).
   The `DeltaLog` is passed explicitly (attach it with `store.attach(deltalog)` first; the store
   exposes no delta-log accessor). You bring authn/z via `dependencies=[Depends(...)]`, applied to
