@@ -1,4 +1,4 @@
-"""``datacrystal.testing`` — the COMMIT-DELTA-v1 consumer conformance kit.
+"""``datacrystal.testing`` — the COMMIT-DELTA-v2 consumer conformance kit.
 
 KICKOFF M3 deliverable: extension authors (FTS, vector, mirrors, replication
 followers, …) certify their delta consumers against the spec §4 obligations
@@ -175,7 +175,9 @@ def check_delta_consumer(
     section("§4.4 gap refusal", consumer.watermark == 3,
             "the consumer did not recover once the missing delta arrived")
 
-    # -- §4.5: version refusal -------------------------------------------------
+    # -- §4.5: version exactness — refusal in BOTH directions -------------------
+    # (COMMIT-DELTA-v2 §4.5 under the no-compat ruling: a v2 consumer accepts
+    # exactly v == 2; older streams are recreated, never migrated.)
     ran.append("§4.5 version refusal")
     consumer = factory()
     newer = _stream_create_update_delete()[0]
@@ -189,6 +191,18 @@ def check_delta_consumer(
             "a delta with a newer contract version MUST raise")
     section("§4.5 version refusal", consumer.watermark == 0,
             "the refused newer-version delta moved the watermark")
+    older = _stream_create_update_delete()[0]
+    older["v"] = CONTRACT_VERSION - 1
+    older_refused = False
+    try:
+        consumer.apply(older)
+    except Exception:
+        older_refused = True
+    section("§4.5 version refusal", older_refused,
+            "a delta with an OLDER contract version MUST raise — pre-v2 "
+            "streams are recreated, never migrated (COMMIT-DELTA-v2 §7)")
+    section("§4.5 version refusal", consumer.watermark == 0,
+            "the refused older-version delta moved the watermark")
 
     # -- §3: unknown ops are refused, never guessed ----------------------------
     ran.append("§3 unknown op")
@@ -240,6 +254,21 @@ def check_delta_consumer(
     section("§3.1 delete totality", content(deleted) == content(empty),
             "after a delete tombstone, derived state must hold nothing for the "
             "deleted record (spec §3.1)")
+
+    # -- §2 stamps: audit fields never influence derived state -----------------
+    # (COMMIT-DELTA-v2: actor/at are REQUIRED audit metadata; a consumer must
+    # accept any stamp values and derive identical state from them.)
+    ran.append("§2 stamp indifference")
+    default_stamps = factory()
+    for delta in _stream_create_update_delete():
+        default_stamps.apply(delta)
+    restamped = factory()
+    for delta in _stream_create_update_delete():
+        delta["actor"], delta["at"] = 900, _AT_NS + delta["tid"]
+        restamped.apply(delta)
+    section("§2 stamp indifference", content(restamped) == content(default_stamps),
+            "different actor/at stamps changed the derived state — stamps are "
+            "audit metadata, never data (COMMIT-DELTA-v2 §5)")
     return ran
 
 

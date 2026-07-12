@@ -99,9 +99,9 @@ class FtsSidecar:
     def apply(self, delta: dict[str, Any]) -> bool:
         if delta.get("f") != FORMAT_MARKER:
             raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
-        if delta["v"] > CONTRACT_VERSION:
+        if delta["v"] != CONTRACT_VERSION:  # §4.5 exactness, both directions
             raise DeltaFormatError(
-                f"delta version {delta['v']} is newer than this sidecar "
+                f"delta version {delta['v']} is not the version this sidecar "
                 f"supports ({CONTRACT_VERSION})"
             )
         tid = delta["tid"]

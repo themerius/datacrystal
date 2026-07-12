@@ -38,8 +38,9 @@ def test_replay_reaches_every_pinned_digest():
         assert applier.apply(raw) is True
         assert applier.state_digest() == digests[str(applier.watermark)]
     assert applier.root_oid == 4096
-    assert len(applier.objects) == 2  # 004 deleted azurite
+    assert len(applier.objects) == 3  # 004 deleted azurite; 005 added calcite
     assert 4098 not in applier.objects
+    assert 4099 in applier.objects  # 005: the anonymous (actor=0) upsert
     assert len(applier.types) == 4  # incl. the evolved Mineral lineage row
 
 
@@ -69,6 +70,30 @@ def test_newer_contract_version_is_refused():
     bumped["v"] = CONTRACT_VERSION + 1
     with pytest.raises(DeltaFormatError, match="newer"):
         ReferenceApplier().apply(encode_delta(bumped))
+
+
+def test_pre_v2_contract_version_is_refused():
+    """§4.5 exactness under the no-compat ruling: v1 is not migrated, it is
+    refused loudly — with the honest incompatible-version message, not a
+    confusing missing-key one."""
+    raws, _ = _load()
+    downgraded = decode_delta(raws[0])
+    downgraded["v"] = CONTRACT_VERSION - 1
+    with pytest.raises(DeltaFormatError, match="predates"):
+        ReferenceApplier().apply(encode_delta(downgraded))
+
+
+def test_stamps_never_perturb_the_state_digest():
+    """COMMIT-DELTA-v2 §5 in bytes: replaying the same ops under different
+    actor/at stamps reaches the SAME pinned digests — stamps are audit
+    metadata, never data (state_digest excludes them by construction)."""
+    raws, digests = _load()
+    restamped = ReferenceApplier()
+    for raw in raws:
+        delta = decode_delta(raw)
+        delta["actor"], delta["at"] = 424242, 1
+        assert restamped.apply(encode_delta(delta)) is True
+        assert restamped.state_digest() == digests[str(restamped.watermark)]
 
 
 def test_unknown_op_is_refused():

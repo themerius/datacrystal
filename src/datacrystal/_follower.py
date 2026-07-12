@@ -37,7 +37,14 @@ from datacrystal._lazy import Lazy
 from datacrystal._storage.memory import MemoryBackend
 from datacrystal._storage.protocol import CommitBatch, StorageBackend, StoredRecord
 from datacrystal._store import Store
-from datacrystal.contract.applier import DeltaGapError, ReferenceApplier, decode_delta
+from datacrystal.contract.applier import (
+    CONTRACT_VERSION,
+    FORMAT_MARKER,
+    DeltaFormatError,
+    DeltaGapError,
+    ReferenceApplier,
+    decode_delta,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -124,11 +131,14 @@ def _apply_catchup(backend: StorageBackend, deltas: Iterable[dict[str, Any]]) ->
     """Apply deltas *after* the backend's current watermark — follower catch-up.
 
     Unlike :func:`_bootstrap_backend` (which replays from genesis with the full
-    ``prior`` check), catch-up has no prior state loaded, so it validates only
-    **gapless ordering** (a skip raises ``DeltaGapError``; an already-seen delta
-    is skipped) — the single-writer source plus the bootstrap-validated prefix
-    make that sufficient. The OID/CID/root bases come from the backend's current
-    meta, so a re-applied delta never regresses them. Returns the new watermark.
+    ``prior`` check), catch-up has no prior state loaded, so it validates
+    **marker + exact contract version** (COMMIT-DELTA-v2 §4.5 — the sync path
+    must fail as loudly as the bootstrap path; pre-W1 it silently applied any
+    version) and **gapless ordering** (a skip raises ``DeltaGapError``; an
+    already-seen delta is skipped) — the single-writer source plus the
+    bootstrap-validated prefix make that sufficient. The OID/CID/root bases
+    come from the backend's current meta, so a re-applied delta never
+    regresses them. Returns the new watermark.
     """
     meta = backend.boot().meta
     watermark = int(meta.get("next_tid", TID_BASE)) - 1
@@ -137,6 +147,19 @@ def _apply_catchup(backend: StorageBackend, deltas: Iterable[dict[str, Any]]) ->
     root_meta = meta.get("root_oid", "")
     root: int | None = int(root_meta) if root_meta else None
     for delta in deltas:
+        if delta.get("f") != FORMAT_MARKER:
+            raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
+        if delta["v"] != CONTRACT_VERSION:
+            if delta["v"] > CONTRACT_VERSION:
+                raise DeltaFormatError(
+                    f"delta version {delta['v']} is newer than this follower "
+                    f"supports ({CONTRACT_VERSION}); upgrade datacrystal"
+                )
+            raise DeltaFormatError(
+                f"delta version {delta['v']} predates v{CONTRACT_VERSION} — "
+                "incompatible (COMMIT-DELTA-v2 §7, no-compat): re-bootstrap "
+                "this follower from a v2 coordinator"
+            )
         tid = int(delta["tid"])
         if tid <= watermark:
             continue  # idempotent skip (apply-twice ≡ apply-once)

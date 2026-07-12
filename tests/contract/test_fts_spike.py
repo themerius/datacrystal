@@ -135,7 +135,8 @@ def test_delete_tombstone_unindexes_via_prior(store_factory, sidecar):
     store.detach(sidecar)
     cid = _cid_of(sidecar, type_info(Specimen).typename)
     tombstone = {
-        "f": "datacrystal-delta", "v": 1, "tid": sidecar.watermark + 1,
+        "f": "datacrystal-delta", "v": 2, "tid": sidecar.watermark + 1,
+        "actor": 0, "at": 0,
         "ops": [{"op": "delete", "oid": oid, "cid": cid,
                  "payload": None, "prior": prior}],
         "types": [], "root": None,
@@ -199,7 +200,8 @@ def test_crash_mid_apply_replays_from_the_watermark(tmp_path):
     sidecar = _CrashMidApply(str(tmp_path / "fts.sqlite"),
                              fulltext={dct.STREAM_TYPENAME: ["notes"]})
     stream = [
-        {"f": "datacrystal-delta", "v": 1, "tid": 1, "root": None,
+        {"f": "datacrystal-delta", "v": 2, "tid": 1, "actor": 0, "at": 0,
+         "root": None,
          "types": [[1, dct.STREAM_TYPENAME, list(dct.STREAM_FIELDS)]],
          "ops": [_kit_upsert(4096, "klare Prismen"),
                  _kit_upsert(4097, "tiefblauer Azurit")]},
