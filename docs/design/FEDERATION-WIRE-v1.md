@@ -7,6 +7,16 @@ from `datacrystal[web]`; the follower client (`open_follower`) lives in core (la
 Every cut **fails closed**. Tracked as epic #146; design:
 [../research/2026-06-20-fractal-followers.md](../research/2026-06-20-fractal-followers.md).
 
+**Amendment 2026-07-12 (epic #168 W1, ADR-008 batch-1 no-compat ruling): the carried contract
+advanced to [COMMIT-DELTA-v2](COMMIT-DELTA-v2.md).** Nothing in THIS contract changed — frame
+layout, endpoints and envelopes are untouched; the wire always self-described the carried
+version (`/v1/head` serves the shared `CONTRACT_VERSION` constant, now `2`; every framed delta
+carries `v`). Where this document's tables say `1`, read the constant. Per the no-compat ruling
+there is no mixed-version fleet story: a pre-v2 follower REFUSES v2 frames loudly — on bootstrap
+(the reference applier) *and* on catch-up (`_apply_catchup`'s version guard, added in W1;
+before that the sync path applied any version silently) — and is re-bootstrapped from a v2
+coordinator. Upgrade both sides together; the versions never coexist.
+
 The wire reuses two byte formats that already exist and are LOCKED — this
 contract adds **no new record/delta encoding**, only an HTTP envelope:
 
