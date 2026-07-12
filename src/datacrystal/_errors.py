@@ -175,6 +175,26 @@ class DanglingRefError(DataCrystalError):
     """
 
 
+class UnknownActorError(DataCrystalError):
+    """``store.acting_as(uid)`` found no ``dc.Actor`` row with that uid.
+
+    The shipped registry resolves session identities (epic #168); an
+    unregistered uid cannot act. Store an ``Actor`` row first — or pass a
+    ``dc.Principal`` directly when identity comes from verified auth claims
+    instead of the registry.
+    """
+
+
+class SponsorRequiredError(DataCrystalError):
+    """``store.acting_as(uid)`` resolved a non-human actor with no sponsor.
+
+    The sponsor gate (epic #168): every technical user names a natural
+    person who answers for it — accountability diffuses in groups, and
+    incident response needs a person to call (the EU AI Act Art. 26(2)
+    human-oversight designation). Set ``Actor.sponsor`` to a human's uid.
+    """
+
+
 class ConsumerDetachedWarning(UserWarning):
     """An attached delta consumer raised during delivery and was detached.
 

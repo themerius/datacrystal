@@ -31,10 +31,11 @@ import io
 import threading
 import warnings
 from collections import deque
+from contextlib import contextmanager
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import TracebackType
-from typing import Any, BinaryIO, Callable, Iterable, Iterator, cast
+from typing import Any, BinaryIO, Callable, Generator, Iterable, Iterator, cast
 
 from datacrystal._conditions import (
     And,
@@ -49,6 +50,7 @@ from datacrystal._conditions import (
     validate_window,
     window_iter,
 )
+from datacrystal._actors import Actor, Principal
 from datacrystal._containers import PersistentDict, PersistentList, wrap_value
 from datacrystal._entity import (
     TYPES_BY_NAME,
@@ -75,8 +77,10 @@ from datacrystal._errors import (
     NotAnEntityError,
     QueryError,
     SchemaMismatchError,
+    SponsorRequiredError,
     StoreClosedError,
     UniqueViolationError,
+    UnknownActorError,
     UnregisteredTypeError,
     UnseenTypeWarning,
     UntrackedMutationWarning,
@@ -210,7 +214,8 @@ class Store:
                  strict_deletes: bool = False,
                  lazy_timeout: float | None = None,
                  lazy_clock: Callable[[], float] | None = None,
-                 cache_dir: Path | None = None) -> None:
+                 cache_dir: Path | None = None,
+                 principal: Principal | None = None) -> None:
         self._backend = backend
         self._lock = lock
         self._owner = threading.get_ident()
@@ -269,6 +274,13 @@ class Store:
         # losing identity and any in-place mutations. Lazy[T] is the explicit
         # cut point where pinning (and memory) stops.
         self._root_holder: Any = None
+        # Session identity (epic #168 W1): the ambient principal this
+        # session's commits are stamped with (COMMIT-DELTA-v2). The opening
+        # identity is config-trusted — someone must open the store that holds
+        # the Actor registry, so bootstrap cannot resolve through it.
+        # acting_as() pushes scoped identities on top; uid 0 = anonymous.
+        self._principal = principal if principal is not None else Principal(uid=0)
+        self._acting: list[Principal] = []
         # COMMIT-DELTA-v1 consumers (ROADMAP item 3). Commits build and
         # deliver deltas only while this list is non-empty — an unwatched
         # store pays nothing for the pipeline (spec §5).
@@ -478,13 +490,73 @@ class Store:
                 raise attempt.conflict
             tries += 1
 
+    # -- session identity (epic #168 W1) --------------------------------------
+
+    @property
+    def principal(self) -> Principal:
+        """The principal currently in effect — the innermost :meth:`acting_as`
+        scope, or the ambient identity given at :meth:`open` (the anonymous
+        ``uid=0`` principal if none was given). Commits are stamped with this
+        principal's uid (COMMIT-DELTA-v2): the stamp is the **committing**
+        identity — writes buffered under A and committed under B stamp B.
+        """
+        return self._acting[-1] if self._acting else self._principal
+
+    @contextmanager
+    def acting_as(self, subject: int | Principal) -> Generator[Principal]:
+        """Switch the session identity for a scope (epic #168 W1).
+
+        Given a :class:`~datacrystal.Principal`, it is used as-is — ephemeral
+        identities built from verified auth claims are fine; datacrystal is
+        never the identity provider ("authenticate outside, remember
+        inside"). Given an ``int`` uid, the shipped :class:`~datacrystal.Actor`
+        registry resolves it and the **sponsor gate** runs in core: a
+        non-human actor without a sponsor cannot act.
+
+        Scopes nest and the innermost wins; on exit the previous identity is
+        restored. ``commit()`` stamps whatever principal is in effect when it
+        runs (the committing identity, not the buffering one).
+
+        Raises:
+            UnknownActorError: no ``dc.Actor`` row carries this uid.
+            SponsorRequiredError: the resolved actor is non-human and names
+                no sponsor (accountability needs a natural person).
+            WrongThreadError: called from a thread other than the store's
+                owner (ADR-001).
+            StoreClosedError: the store has already been closed.
+        """
+        self._enter()
+        if isinstance(subject, Principal):
+            principal = subject
+        else:
+            actor = self.get(Actor, uid=subject)
+            if actor is None:
+                raise UnknownActorError(
+                    f"no dc.Actor with uid={subject} is registered in this "
+                    "store — store an Actor row first, or pass a dc.Principal "
+                    "directly when identity comes from verified auth claims"
+                )
+            if not actor.human and actor.sponsor is None:
+                raise SponsorRequiredError(
+                    f"actor uid={subject} ({actor.display or 'technical user'}) "
+                    "is non-human and names no sponsor — set Actor.sponsor to "
+                    "the natural person who answers for it"
+                )
+            principal = Principal(uid=actor.uid, memberships=dict(actor.memberships))
+        self._acting.append(principal)
+        try:
+            yield principal
+        finally:
+            self._acting.pop()
+
     # -- lifecycle -----------------------------------------------------------
 
     @classmethod
     def open(cls, path: str | Path, *, durability: str = "interval",
              lock_ttl: float = 10.0, debug: bool = False,
              strict_deletes: bool = False,
-             lazy_timeout: float | None = None, cache_index: bool = True) -> "Store":
+             lazy_timeout: float | None = None, cache_index: bool = True,
+             principal: Principal | None = None) -> "Store":
         """Open (creating if needed) the store directory at ``path``.
 
         The directory holds ``data.sqlite`` and the single-writer lease file
@@ -536,6 +608,14 @@ class Store:
         tested). Pass ``cache_index=False`` to skip the sidecar (e.g. a scratch
         store, or one you never reopen).
 
+        ``principal`` (epic #168 W1) is the **ambient session identity** —
+        the config-trusted bootstrap principal (someone must open the store
+        that holds the ``dc.Actor`` registry, so the opening identity cannot
+        resolve through it). Commits are stamped with the acting principal's
+        uid (COMMIT-DELTA-v2); ``acting_as()`` switches identity per scope.
+        Omitted, the store acts as the anonymous principal (``uid=0``) and
+        existing programs are unchanged — identity is opt-in.
+
         Raises:
             StoreLockedError: another process already holds the store's
                 single-writer lease (invariant 10) — e.g. a second
@@ -560,7 +640,8 @@ class Store:
             return cls(backend, lock, p2_inline=sqlite3.threadsafety < 3,
                        debug=debug, strict_deletes=strict_deletes,
                        lazy_timeout=lazy_timeout,
-                       cache_dir=directory if cache_index else None)
+                       cache_dir=directory if cache_index else None,
+                       principal=principal)
         except BaseException:
             lock.release()
             raise
@@ -614,10 +695,12 @@ class Store:
     def _from_backend(cls, backend: StorageBackend, *, debug: bool = False,
                       strict_deletes: bool = False,
                       lazy_timeout: float | None = None,
-                      lazy_clock: Callable[[], float] | None = None) -> "Store":
+                      lazy_clock: Callable[[], float] | None = None,
+                      principal: Principal | None = None) -> "Store":
         """Open over an explicit backend (tests; no lock file)."""
         return cls(backend, None, debug=debug, strict_deletes=strict_deletes,
-                   lazy_timeout=lazy_timeout, lazy_clock=lazy_clock)
+                   lazy_timeout=lazy_timeout, lazy_clock=lazy_clock,
+                   principal=principal)
 
     def close(self) -> None:
         """Close the store. Uncommitted changes are discarded (commit first)."""
