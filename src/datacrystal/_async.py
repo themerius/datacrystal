@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from datacrystal._actors import Principal
 from datacrystal._conditions import Condition
 from datacrystal._pipeline import DeltaConsumer
 from datacrystal._snapshot import Snapshot
@@ -38,16 +40,20 @@ from datacrystal._store import Store
 async def aopen(path: str | Path, *, durability: str = "interval",
                 lock_ttl: float = 10.0, debug: bool = False,
                 lazy_timeout: float | None = None,
-                cache_index: bool = True) -> "AsyncStore":
+                cache_index: bool = True,
+                principal: Principal | None = None) -> "AsyncStore":
     """Open a store bound to the running event loop.
 
     The boot scan runs on the loop thread (the store's owner must be the
     loop's thread — ADR-001 binding semantics), so ``aopen()`` blocks the
     loop once at startup; boot is O(checkpoint), never O(history).
+
+    ``principal`` is the ambient session identity, exactly as on
+    :meth:`Store.open` (epic #168 W1).
     """
     store = Store.open(path, durability=durability, lock_ttl=lock_ttl,
                        debug=debug, lazy_timeout=lazy_timeout,
-                       cache_index=cache_index)
+                       cache_index=cache_index, principal=principal)
     return AsyncStore(store)
 
 
@@ -144,6 +150,23 @@ class AsyncStore:
         ``run_in_executor`` work that must not touch live entities).
         """
         return self._store.snapshot()
+
+    @property
+    def principal(self) -> Principal:
+        """The principal currently in effect **for this task** — acting_as
+        scopes are contextvar-backed, so each task on the loop sees its own
+        identity stack over the shared ambient principal (epic #168 W1).
+        """
+        return self._store.principal
+
+    def acting_as(self, subject: int | Principal) -> AbstractContextManager[Principal]:
+        """Switch the session identity for a scope — see
+        :meth:`Store.acting_as`. The scope is **task-confined**: held across
+        an ``await``, it never leaks into interleaved tasks on the same loop
+        (contextvars), which is exactly the per-request identity a web
+        handler needs. Use as a plain ``with`` block inside async code.
+        """
+        return self._store.acting_as(subject)
 
     # -- the awaitable commit ------------------------------------------------
 

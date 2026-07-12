@@ -94,6 +94,59 @@ class TestActingAs:
             pass  # Anna is human; no sponsor required
 
 
+class TestTaskConfinement:
+    """acting_as under aopen()/AsyncStore: contextvar-backed, task-confined.
+
+    The load-bearing test is the interleave: task A holds acting_as across an
+    await while task B runs — B must see its OWN identity (the ambient one),
+    never A's. A plain stack would leak here; the ContextVar cannot.
+    """
+
+    def test_scope_survives_awaits_within_one_task(self, store):
+        import asyncio
+
+        from datacrystal._async import AsyncStore
+
+        async def main():
+            astore = AsyncStore(store)
+            with astore.acting_as(dc.Principal(uid=7)):
+                await asyncio.sleep(0)
+                assert astore.principal.uid == 7  # still me after the await
+            assert astore.principal.uid == 0
+
+        asyncio.run(main())
+
+    def test_interleaved_tasks_never_see_each_others_identity(self, store):
+        import asyncio
+
+        from datacrystal._async import AsyncStore
+
+        seen: dict[str, int] = {}
+
+        async def main():
+            astore = AsyncStore(store)
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def task_a():
+                with astore.acting_as(dc.Principal(uid=7)):
+                    entered.set()
+                    await release.wait()          # hold the scope across awaits
+                    seen["a"] = astore.principal.uid
+
+            async def task_b():
+                await entered.wait()              # A is inside its scope now
+                seen["b"] = astore.principal.uid  # must NOT be 7
+                with astore.acting_as(dc.Principal(uid=8)):
+                    seen["b_scoped"] = astore.principal.uid
+                release.set()
+
+            await asyncio.gather(task_a(), task_b())
+
+        asyncio.run(main())
+        assert seen == {"a": 7, "b": 0, "b_scoped": 8}
+
+
 class TestOwnerConfinement:
     def test_foreign_thread_raises_before_any_switch(self, store):
         caught: list[BaseException] = []
