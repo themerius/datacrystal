@@ -5,7 +5,7 @@ objects ARE the database; pickle-free msgpack records, roaring-bitmap queries, S
 durability, and three released-shape extras: `datacrystal[fts]` (FTS5 + Snowball),
 `datacrystal[arrow]` (persistent parquet mirrors), and `datacrystal[web]` (FastAPI/Pydantic +
 Strawberry GraphQL). Solo maintainer: Sven Hodapp. Version
-`0.6.0` — v0.1.0 was the **API-freeze baseline (2026-06-13)**; v0.2–0.6 ship a purely
+`0.8.0` — v0.1.0 was the **API-freeze baseline (2026-06-13)**; v0.2–0.8 ship a purely
 **additive surface** (the v0.1.0 freeze is never broken): **0.2** = query ergonomics
 (multi-valued list index, `limit`/`offset` + `query_iter`, `RenamedFrom`, streaming
 `ArrowMirror.bootstrap`, iterative graph read-path + `list[Lazy]` adjacency, `store.incoming()`);
@@ -15,7 +15,11 @@ top-K + reverse-index caching; **0.5** = `dc.Blob` out-of-line blobs — lazy `B
 **0.6** = `datacrystal[web]` — `@entity` reflected into REST (Pydantic boundary
 `entity_model`/`to_pydantic`/`from_pydantic`) + GraphQL (Strawberry-over-snapshots, zero Pydantic),
 public miss-tolerant `Snapshot.get_many`, per-request DataLoader (no-N+1, O(depth)), and a
-per-watermark snapshot pool (reads O(n)/commit, not O(n)/request).
+per-watermark snapshot pool (reads O(n)/commit, not O(n)/request); **0.7** = web one-to-many
+edges + datetime Index/Unique keys + the nightly 1M lane; **0.8** = fractal followers
+(`datacrystal[follower]`: `web.federation_router` over FEDERATION-WIRE-v1, core
+`Store.follower`/`open_follower` + `sync()`/`discard()`/`committing()`, OCC via prior-payload
+digest).
 Extras are pre-tag contract validators, COMMIT-DELTA-v1 LOCKED, pyright-strict CI-gated. PyPI
 publication deferred (names reserved). Releases run through `release.yml` (workflow_dispatch,
 pick bump) — never bump versions by hand.
@@ -90,13 +94,15 @@ stale venv shebangs — `rm -rf .venv && uv sync`.
 - **Gandalf (the PO skill) owns prioritization, splitting/merging, refinement, hygiene** — invoke
   it for any backlog question. Sizing unit = "concerns"; priority = the Gandalf Score.
 - **Where things live — three orthogonal axes, one tool each (don't fuse them):** *when it ships* →
-  the **milestone = a sprint** (`Sprint 1`, `Sprint 2`, … = the planned waves; one per issue, it
-  closes; unscheduled backlog has NO milestone); *which product goal it advances* → **`theme:`
+  the **milestone = one shippable initiative** — historically one sprint wave (`Sprint N`); since
+  2026-07-12 (#168) a multi-wave epic gets ONE **campaign milestone** spanning its waves (wave-level
+  issues cut up front for overview; it still closes when the campaign ships; one per issue;
+  unscheduled backlog has NO milestone); *which product goal it advances* → **`theme:`
   labels** (many per issue, perpetual, cross-cuts sprints — a goal never "completes"); *the why* →
-  `VISION.md`. Goals are labels, not milestones, precisely because a goal spans many sprints and an
-  issue advances several at once.
-- **Label taxonomy** (kept deliberately small — "gandalf-fied"): **milestone** = sprint
-  (`Sprint N`; backlog items have none); **`priority:`** = Gandalf band
+  `VISION.md`. Goals are labels, never milestones (ruled again 2026-07-12), precisely because a goal
+  spans many sprints, never closes, and an issue advances several at once.
+- **Label taxonomy** (kept deliberately small — "gandalf-fied"): **milestone** = initiative
+  (a `Sprint N` wave or a multi-wave campaign; backlog items have none); **`priority:`** = Gandalf band
   (golden/high/normal/not-now); **`theme:`** = product goal; **`roadmap`** / **`eval-feedback`** =
   origin; **`epic`** / **`spike`** = Gandalf type; **`frozen-api`** = touches the v0.1.0 freeze → v0.2+;
   **`needs-owner-decision`** = blocked on a Sven ruling (no code until answered). Plus stock
@@ -105,10 +111,12 @@ stale venv shebangs — `rm -rf .venv && uv sync`.
   and any `needs-owner-decision` spike is answered. The resulting sequence IS the Sprint milestones
   (the live plan, in order); #20 reverse-ref is the standing Golden Ticket. Refined stories +
   acceptance criteria live as a Gandalf comment on each issue.
-- **Epics span sprints; materialize sub-stories just-in-time.** An `epic` is milestoned to the sprint
-  where its work *starts*; its sub-stories live as a checklist in the epic's refinement comment and
-  are cut into their own issue + sprint only when actually pulled — never bulk-create sub-issues
-  ahead of need.
+- **Epics span sprints; materialize sub-stories just-in-time.** A one-wave `epic` is milestoned to
+  the sprint where its work *starts*; an epic too big for one wave gets its own **campaign
+  milestone** with wave-level issues cut up front (the overview unit — precedent: #168, milestone
+  "Permissions"). In both cases leaf stories live as checklists (epic refinement comment / wave
+  issue bodies) and are cut into their own issue only when actually pulled — never bulk-create
+  leaf sub-issues ahead of need.
 
 ## Sprint token accounting
 
