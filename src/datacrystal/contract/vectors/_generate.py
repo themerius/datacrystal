@@ -34,7 +34,7 @@ def ref(oid: int) -> msgspec.msgpack.Ext:
 
 # The mineral cabinet, as always. OIDs start at 4096 (the engine's OID_BASE
 # partition is an engine detail; the contract only needs ints).
-ROOT, TSUMEB, AZURITE = 4096, 4097, 4098
+ROOT, TSUMEB, AZURITE, CALCITE = 4096, 4097, 4098, 4099
 
 ROOT_CID, LOCALITY_CID, MINERAL_CID, MINERAL_V2_CID = 1, 2, 3, 4
 
@@ -44,6 +44,8 @@ azurite_v2 = _enc.encode(["Q193563", "azurite", "triclinic", ref(TSUMEB)])
 root_v1 = _enc.encode([[ref(AZURITE)]])
 # tid 3 evolves Mineral additively: + mohs (new lineage row, new cid)
 azurite_v3 = _enc.encode(["Q193563", "azurite", "triclinic", ref(TSUMEB), 3.7])
+# tid 5's anonymous upsert (the v1-shape Mineral cid — 4 fields)
+calcite_v1 = _enc.encode(["Q23744", "calcite", "trigonal", ref(TSUMEB)])
 
 # Pinned v2 stamps: `at` is a fixed epoch-ns base plus the tid (documenting
 # per-delta instants without a real clock); actors tell the walkthrough's
@@ -107,6 +109,19 @@ DELTAS = [
         "ops": [
             {"op": "delete", "oid": AZURITE, "cid": MINERAL_V2_CID,
              "payload": None, "prior": azurite_v3},
+        ],
+        "root": ROOT,
+    }),
+    # 005: the ANONYMOUS end of always-stamp-both (COMMIT-DELTA-v2 §1),
+    # documented in bytes — actor 0 is a stamp like any other, `at` still
+    # present. A store opened without a principal emits exactly this shape.
+    ("005-anonymous", {
+        "f": "datacrystal-delta", "v": 2, "tid": 5,
+        "actor": 0, "at": AT_NS + 5,
+        "types": [],
+        "ops": [
+            {"op": "upsert", "oid": CALCITE, "cid": MINERAL_CID,
+             "payload": calcite_v1, "prior": None},
         ],
         "root": ROOT,
     }),

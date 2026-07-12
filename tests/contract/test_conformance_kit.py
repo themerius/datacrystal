@@ -27,6 +27,7 @@ ALL_SECTIONS = [
     "§3 unknown op",
     "§3 prior un-index",
     "§3.1 delete totality",
+    "§2 stamp indifference",
 ]
 
 
@@ -79,8 +80,8 @@ class _TermIndex:
         self._forget(oid, prior)
 
     def apply(self, delta: dict[str, Any]) -> bool:
-        if delta["v"] > CONTRACT_VERSION:
-            raise DeltaFormatError("newer contract version")
+        if delta["v"] != CONTRACT_VERSION:  # §4.5 exactness, both directions
+            raise DeltaFormatError("unsupported contract version")
         tid = delta["tid"]
         if tid <= self.watermark:
             return False
