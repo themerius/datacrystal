@@ -55,12 +55,21 @@ _P1 = _encode(["Q43010", "quartz", "clear hexagonal prism from Tsumeb"])
 _P2 = _encode(["Q43010", "quartz", "massive milky vein quartz"])
 
 
+# The kit's pinned v2 audit stamps (COMMIT-DELTA-v2 §2: actor/at are
+# REQUIRED keys). Fixed values keep the synthetic streams deterministic —
+# stamps never influence derived state (state digests exclude them).
+STREAM_ACTOR = 0  # anonymous — the kit certifies consumers, not identities
+_AT_NS = 1_700_000_000_000_000_000
+
+
 def _delta(tid: int, ops: list[dict[str, Any]],
            types: list[list[Any]] | None = None) -> dict[str, Any]:
     return {
         "f": FORMAT_MARKER,
         "v": CONTRACT_VERSION,
         "tid": tid,
+        "actor": STREAM_ACTOR,
+        "at": _AT_NS,
         "ops": ops,
         "types": list(types) if types else [],
         "root": None,
@@ -270,10 +279,15 @@ class CountingConsumer:
     def apply(self, delta: dict[str, Any]) -> bool:
         if delta.get("f") != FORMAT_MARKER:
             raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
-        if delta["v"] > CONTRACT_VERSION:
+        if delta["v"] != CONTRACT_VERSION:
+            if delta["v"] > CONTRACT_VERSION:
+                raise DeltaFormatError(
+                    f"delta version {delta['v']} is newer than this consumer "
+                    f"supports ({CONTRACT_VERSION}); upgrade the consumer"
+                )
             raise DeltaFormatError(
-                f"delta version {delta['v']} is newer than this consumer "
-                f"supports ({CONTRACT_VERSION}); upgrade the consumer"
+                f"delta version {delta['v']} predates v{CONTRACT_VERSION} — "
+                "incompatible (COMMIT-DELTA-v2 §7, no-compat): recreate the stream"
             )
         tid = delta["tid"]
         if tid <= self.watermark:

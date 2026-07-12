@@ -111,7 +111,8 @@ def test_delete_of_an_unknown_oid_is_refused():
     applier = ReferenceApplier()
     applier.apply(raws[0])
     ghost = {
-        "f": "datacrystal-delta", "v": 1, "tid": 2, "types": [],
+        "f": "datacrystal-delta", "v": 2, "tid": 2, "actor": 2, "at": 0,
+        "types": [],
         "ops": [{"op": "delete", "oid": 99999, "cid": 2,
                  "payload": None, "prior": None}],
         "root": 4096,

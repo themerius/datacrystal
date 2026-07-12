@@ -1,14 +1,17 @@
-"""Author the COMMIT-DELTA-v1 replay vectors (DRAFT rev 1).
+"""Author the COMMIT-DELTA-v2 replay vectors.
 
-Run once per draft rev (`uv run python src/datacrystal/contract/vectors/_generate.py`)
+Run once per contract version (`uv run python src/datacrystal/contract/vectors/_generate.py`)
 and commit the outputs. The vectors are BYTE-PINNED: regenerating them is a
-draft-rev bump with a spec edit, never a quiet refresh (spec §6).
+contract-version bump with a new spec, never a quiet refresh (spec §6). The
+v2 regeneration (epic #168 W1) replaced the retired v1 set wholesale under
+the no-compat ruling — the state DIGESTS are unchanged by construction
+(``state_digest`` excludes the ``actor``/``at`` stamps; only the bytes moved).
 
-Deterministic by construction — fixed OIDs/strings, no clock, no randomness.
-The payloads are hand-built record encodings (msgpack value lists with
-entity refs as ext-type-1 8-byte OIDs), independent of the engine on
-purpose: the contract defines what the engine must emit at M3, not the
-other way around.
+Deterministic by construction — fixed OIDs/strings, a PINNED ``at`` clock
+value, fixed actors, no randomness. The payloads are hand-built record
+encodings (msgpack value lists with entity refs as ext-type-1 8-byte OIDs),
+independent of the engine on purpose: the contract defines what the engine
+must emit, not the other way around.
 """
 
 from __future__ import annotations
@@ -42,9 +45,15 @@ root_v1 = _enc.encode([[ref(AZURITE)]])
 # tid 3 evolves Mineral additively: + mohs (new lineage row, new cid)
 azurite_v3 = _enc.encode(["Q193563", "azurite", "triclinic", ref(TSUMEB), 3.7])
 
+# Pinned v2 stamps: `at` is a fixed epoch-ns base plus the tid (documenting
+# per-delta instants without a real clock); actors tell the walkthrough's
+# story — 1 bootstraps, 2 (the curator) works.
+AT_NS = 1_700_000_000_000_000_000
+
 DELTAS = [
     ("001-genesis", {
-        "f": "datacrystal-delta", "v": 1, "tid": 1,
+        "f": "datacrystal-delta", "v": 2, "tid": 1,
+        "actor": 1, "at": AT_NS + 1,
         "types": [
             [ROOT_CID, "datacrystal._store:_Root", ["value"]],
             [LOCALITY_CID, "minerals:Locality", ["qid", "name"]],
@@ -62,7 +71,8 @@ DELTAS = [
         "root": ROOT,
     }),
     ("002-update", {
-        "f": "datacrystal-delta", "v": 1, "tid": 2,
+        "f": "datacrystal-delta", "v": 2, "tid": 2,
+        "actor": 2, "at": AT_NS + 2,
         "types": [],
         "ops": [
             {"op": "upsert", "oid": AZURITE, "cid": MINERAL_CID,
@@ -71,7 +81,8 @@ DELTAS = [
         "root": ROOT,
     }),
     ("003-evolution", {
-        "f": "datacrystal-delta", "v": 1, "tid": 3,
+        "f": "datacrystal-delta", "v": 2, "tid": 3,
+        "actor": 2, "at": AT_NS + 3,
         "types": [
             [MINERAL_V2_CID, "minerals:Mineral",
              ["qid", "name", "crystal_system", "type_locality", "mohs"]],
@@ -90,7 +101,8 @@ DELTAS = [
     # consumer must apply this without complaint; only *following* the
     # dangle is an error, and that happens outside the stream.
     ("004-delete", {
-        "f": "datacrystal-delta", "v": 1, "tid": 4,
+        "f": "datacrystal-delta", "v": 2, "tid": 4,
+        "actor": 2, "at": AT_NS + 4,
         "types": [],
         "ops": [
             {"op": "delete", "oid": AZURITE, "cid": MINERAL_V2_CID,
@@ -110,7 +122,7 @@ def main() -> None:
         assert applier.apply(raw) is True
         digests[str(delta["tid"])] = applier.state_digest()
     (HERE / "expected.json").write_text(
-        json.dumps({"contract_version": 1, "digests": digests}, indent=2) + "\n"
+        json.dumps({"contract_version": 2, "digests": digests}, indent=2) + "\n"
     )
     print(f"wrote {len(DELTAS)} vectors; final digest {applier.state_digest()}")
 

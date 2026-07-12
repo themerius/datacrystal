@@ -52,7 +52,10 @@ def test_attached_consumer_sees_every_commit(store_factory):
 
     assert consumer.watermark == store.last_tid == 2
     create, update = consumer.deltas
-    assert create["f"] == "datacrystal-delta" and create["v"] == 1
+    assert create["f"] == "datacrystal-delta" and create["v"] == 2
+    # v2 stamps (COMMIT-DELTA-v2 §2, always-stamp-both): this store was
+    # opened without a principal → anonymous actor 0; `at` is int ns.
+    assert create["actor"] == 0 and isinstance(create["at"], int)
     assert {op["op"] for op in create["ops"]} == {"upsert"}
     # tid 1 created everything: no op carries a prior payload
     assert all(op["prior"] is None for op in create["ops"])

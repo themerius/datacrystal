@@ -61,7 +61,7 @@ def test_head_and_deltas_serve_the_wire(store_factory, tmp_path) -> None:
             assert head == {
                 "tid": store.last_tid,
                 "format": "datacrystal-delta",
-                "version": 1,
+                "version": 2,
             }
             assert head["tid"] == tids[-1]
 
@@ -71,7 +71,7 @@ def test_head_and_deltas_serve_the_wire(store_factory, tmp_path) -> None:
             deltas = _parse_frames(resp.content)
             # exact set, strict TID order, every frame a well-formed delta
             assert [d["tid"] for d in deltas] == tids
-            assert all(d["f"] == "datacrystal-delta" and d["v"] == 1 for d in deltas)
+            assert all(d["f"] == "datacrystal-delta" and d["v"] == 2 for d in deltas)
 
             # past the watermark → empty; mid-stream resume → only the tail
             assert _parse_frames(

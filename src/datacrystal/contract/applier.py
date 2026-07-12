@@ -1,8 +1,16 @@
-"""COMMIT-DELTA-v1 reference applier (DRAFT rev 1).
+"""COMMIT-DELTA-v2 reference applier.
 
 This file is **normative**: where the prose spec
-(docs/design/COMMIT-DELTA-v1.md) and this implementation disagree, this
+(docs/design/COMMIT-DELTA-v2.md) and this implementation disagree, this
 implementation and the byte-pinned replay vectors win.
+
+v2 (epic #168 W1): every delta carries the required audit stamps ``actor``
+(committing principal's uid, 0 = anonymous) and ``at`` (int ns, injectable
+clock). Under the no-compat ruling (ADR-008 batch 1) a v2 consumer accepts
+**exactly** ``v == 2`` — newer AND older versions are refused loudly
+(§4.5); pre-v2 streams are recreated, never migrated. ``state_digest()``
+deliberately excludes the stamps, so replayed *state* stays byte-stable
+across clock and identity differences.
 
 Engine-free by design — it imports msgspec, stdlib, and (when available)
 the datacrystal error taxonomy. Copy this single file into any consumer
@@ -36,14 +44,14 @@ __all__ = [
 ]
 
 FORMAT_MARKER = "datacrystal-delta"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 
-_REQUIRED_KEYS = ("f", "v", "tid", "ops", "types", "root")
+_REQUIRED_KEYS = ("f", "v", "tid", "actor", "at", "ops", "types", "root")
 _REQUIRED_OP_KEYS = ("op", "oid", "cid", "payload", "prior")
 
 
 class DeltaFormatError(_Base):
-    """A delta violates the COMMIT-DELTA-v1 shape, carries an unsupported
+    """A delta violates the COMMIT-DELTA-v2 shape, carries an unsupported
     version, or contradicts the consumer's state (a producer bug).
     """
 
@@ -92,16 +100,26 @@ class ReferenceApplier:
         """
         if isinstance(delta, (bytes, bytearray, memoryview)):
             delta = decode_delta(bytes(delta))
+        # Marker and version are judged BEFORE the required-key sweep so a
+        # pre-v2 delta gets the honest "incompatible version" refusal, not a
+        # confusing "missing key 'actor'" (§4.5 exactness, both directions).
+        if delta.get("f") != FORMAT_MARKER:
+            raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
+        version = delta.get("v")
+        if version != CONTRACT_VERSION:
+            if isinstance(version, int) and version > CONTRACT_VERSION:
+                raise DeltaFormatError(
+                    f"delta version {version} is newer than this consumer "
+                    f"supports ({CONTRACT_VERSION}); upgrade the consumer"
+                )
+            raise DeltaFormatError(
+                f"delta version {version!r} predates v{CONTRACT_VERSION} — "
+                "incompatible (COMMIT-DELTA-v2 §7, no-compat): recreate the "
+                "stream from the live store"
+            )
         for key in _REQUIRED_KEYS:
             if key not in delta:
                 raise DeltaFormatError(f"delta is missing required key {key!r}")
-        if delta["f"] != FORMAT_MARKER:
-            raise DeltaFormatError(f"not a datacrystal delta: f={delta['f']!r}")
-        if delta["v"] > CONTRACT_VERSION:
-            raise DeltaFormatError(
-                f"delta version {delta['v']} is newer than this consumer "
-                f"supports ({CONTRACT_VERSION}); upgrade the consumer"
-            )
         tid = delta["tid"]
         if tid <= self.watermark:
             return False  # apply-twice ≡ apply-once (spec §4.2)
