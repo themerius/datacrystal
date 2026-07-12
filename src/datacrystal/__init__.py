@@ -27,6 +27,19 @@ Design docs: docs/design/ in the repository (DESIGN.md, ROADMAP.md, ADR-001).
 
 from typing import TYPE_CHECKING
 
+from datacrystal._actors import (
+    ADMIN,
+    AGENT,
+    AUTOMATION,
+    CURATOR,
+    EXECUTIVE,
+    NO_STANDING,
+    PUBLIC,
+    STAFF,
+    VIEWER,
+    Actor,
+    Principal,
+)
 from datacrystal._conditions import fields
 from datacrystal._containers import PersistentDict, PersistentList
 from datacrystal._entity import (
@@ -94,6 +107,17 @@ __all__ = [
     "open_follower",
     "entity",
     "fields",
+    "Principal",
+    "Actor",
+    "PUBLIC",
+    "NO_STANDING",
+    "VIEWER",
+    "AGENT",
+    "AUTOMATION",
+    "STAFF",
+    "CURATOR",
+    "ADMIN",
+    "EXECUTIVE",
     "Lazy",
     "Index",
     "Unique",

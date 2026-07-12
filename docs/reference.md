@@ -651,6 +651,47 @@ The FastAPI/Strawberry deployment recipe built on these primitives is
 [the web-deployment how-to](how-to/web-deployment.md); its reflection API is
 [below](#datacrystalweb-reflection-api).
 
+## Actors and principals
+
+Session identity for audit-stamped commits (epic #168, W1). A `dc.Principal` is the
+in-memory acting subject — `uid` plus `memberships` (group id → level); a `dc.Actor` is
+the shipped registry entity, one ordinary record per human or technical user in the same
+store as the data, so every sponsorship or membership change rides the same commit-delta
+stream as the data changes it later explains:
+
+```python
+import datacrystal as dc
+
+ORG, TEAM = 1, 2                           # group ids are yours to define
+
+# The opening identity comes from app config — someone must open the store
+# that holds the registry (the bootstrap identity is config-trusted, not
+# registry-resolved).
+store = dc.Store.open("cabinet.store",
+                      principal=dc.Principal(uid=1, memberships={ORG: dc.ADMIN}))
+
+store.store(dc.Actor(uid=2, display="Anna", human=True,
+                     memberships={ORG: dc.STAFF, TEAM: dc.CURATOR}))
+store.store(dc.Actor(uid=900, display="parser swarm", human=False,
+                     sponsor=2,            # a natural person answers for it
+                     memberships={TEAM: dc.AGENT}))
+store.commit()                             # stamped: actor=1
+```
+
+- The **ladder constants** are shipped names, spaced by 100 for later insertions:
+  `dc.NO_STANDING` (−1, the absence of any shared group — not grantable), `dc.VIEWER` (0),
+  `dc.AGENT` (100), `dc.AUTOMATION` (200), `dc.STAFF` (300), `dc.CURATOR` (400),
+  `dc.ADMIN` (500), `dc.EXECUTIVE` (600) — plus the world group id `dc.PUBLIC` (0; every
+  principal implicitly holds `{PUBLIC: VIEWER}`). Apps may define their own levels on top;
+  the order is the semantics.
+- A store opened **without** `principal=` acts as the anonymous principal (`uid=0`) and
+  stamps its commits `actor=0` — identity is opt-in, existing programs are unchanged.
+- `Actor.sponsor` names a natural person's uid and is **required for every non-human
+  actor** — `store.acting_as()` enforces the gate (a technical user without a sponsor
+  cannot act).
+- W1 ships **identity + stamps only**: no permission is checked anywhere yet. Floors and
+  enforcement are `[planned — Permissions W2–W4]` (see the campaign milestone).
+
 ## Snapshots
 
 A snapshot is a frozen view of the committed state at one commit watermark, and the
