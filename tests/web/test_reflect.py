@@ -174,3 +174,47 @@ def test_rejects_non_entity_class() -> None:
 
     with pytest.raises(dc.NotAnEntityError):
         entity_model(Plain)
+
+
+# --- protected classes: labels never ride DTOs (ADR-008, W2-1) ---------------
+
+
+@dc.entity(protected=True)
+class CuratedContact:
+    name: Annotated[str, dc.Unique]
+    org: str = ""
+
+
+def test_protected_class_exposes_no_label_columns() -> None:
+    # Security labels are lib-managed columns; reflection is the one funnel
+    # every web face rides (REST plain/create/public + Strawberry), so the
+    # _dc_ skip here proves no face can read OR accept them.
+    for face in ("plain", "create", "public"):
+        model = entity_model(CuratedContact, face=face)
+        assert not any(n.startswith("_dc_") for n in model.model_fields), face
+
+
+def test_from_pydantic_roundtrips_a_protected_create_face(store_factory) -> None:
+    from datacrystal.web import from_pydantic
+
+    create = entity_model(CuratedContact, face="create")
+    dto = create(name="Meyer Solartechnik GmbH", org="PV")
+    s = store_factory()
+    rec = from_pydantic(dto, CuratedContact, store=s)
+    # a fresh STATE_NEW instance with inert birth labels — client input can
+    # never have touched the injected columns (they are not model fields)
+    assert rec.name == "Meyer Solartechnik GmbH"
+    assert rec._dc_owner == 0 and list(rec._dc_groups) == []
+    s.store(rec)
+    s.commit()
+    assert s.get(CuratedContact, name="Meyer Solartechnik GmbH") is not None
+    s.close()
+
+
+def test_client_supplied_label_keys_are_ignored() -> None:
+    create = entity_model(CuratedContact, face="create")
+    dto = create.model_validate(
+        {"name": "Sneaky GmbH", "_dc_owner": 999, "_dc_write_floor": 0})
+    assert not hasattr(dto, "_dc_owner")
+    dumped = dto.model_dump()
+    assert "_dc_owner" not in dumped and "_dc_write_floor" not in dumped

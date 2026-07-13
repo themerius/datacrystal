@@ -35,6 +35,22 @@ from collections.abc import Mapping
 
 from datacrystal._entity import Index, Unique, entity
 
+# The ladder constants moved to the _permissions leaf module in W2-1 —
+# _entity.py needs them for the injected column defaults and imports of
+# _actors would cycle (this module imports _entity). Re-exported here so the
+# public dc.* surface is byte-compatible with W1 (ADR-008 batch-1 R3).
+from datacrystal._permissions import (  # re-exports, all listed in __all__
+    ADMIN,
+    AGENT,
+    AUTOMATION,
+    CURATOR,
+    EXECUTIVE,
+    NO_STANDING,
+    PUBLIC,
+    STAFF,
+    VIEWER,
+)
+
 __all__ = [
     "PUBLIC",
     "NO_STANDING",
@@ -48,22 +64,6 @@ __all__ = [
     "Principal",
     "Actor",
 ]
-
-PUBLIC = 0
-"""The world group id: every principal implicitly holds ``{PUBLIC: VIEWER}``."""
-
-# The ladder — levels within a shared group, spaced by 100 so levels can be
-# inserted without renumbering. NO_STANDING is not a grantable level: it is
-# the *absence* of any shared group, kept distinct from VIEWER so floors stay
-# readable ("read_floor=VIEWER" means "any member may view").
-NO_STANDING = -1
-VIEWER = 0
-AGENT = 100
-AUTOMATION = 200
-STAFF = 300
-CURATOR = 400
-ADMIN = 500
-EXECUTIVE = 600
 
 
 @dataclass(frozen=True)

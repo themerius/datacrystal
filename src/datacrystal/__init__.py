@@ -42,6 +42,7 @@ from datacrystal._actors import (
 )
 from datacrystal._conditions import fields
 from datacrystal._containers import PersistentDict, PersistentList
+from datacrystal._permissions import Permissions
 from datacrystal._entity import (
     Blob,
     FullText,
@@ -112,6 +113,7 @@ __all__ = [
     "fields",
     "Principal",
     "Actor",
+    "Permissions",
     "PUBLIC",
     "NO_STANDING",
     "VIEWER",
