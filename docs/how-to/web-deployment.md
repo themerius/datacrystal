@@ -14,7 +14,7 @@ would wire by hand. Three primitives, one doctrine.
 
 ```python
 from datacrystal.web import (
-    create_app, read_snapshot, submit_write, get_store, graphql_context_getter,
+    create_app, read_snapshot, submit_write, get_principal, get_store, graphql_context_getter,
 )
 from datacrystal.web import to_pydantic, from_pydantic
 
@@ -144,3 +144,36 @@ with store.snapshot() as snap:
     # context_value carries a fresh SnapshotLoader under LOADER_CONTEXT_KEY; sibling reference
     # edges in one resolver tick batch into a single Snapshot.get_many (no N+1).
 ```
+
+
+## Give web writes an identity (`get_principal`)
+
+Every write shipped through `submit_write` runs under the **request principal** —
+by default the anonymous one (`actor=0` in the commit stamps), deliberately never
+the identity the store was opened with. Wire your auth in with a standard
+FastAPI dependency override:
+
+```python
+from datacrystal.web import get_principal
+
+def resolve(request: Request) -> dc.Principal | None:
+    claims = verify_token(request.headers.get("authorization"))
+    if claims is None:
+        return None                      # anonymous — reads fine, protected writes 403
+    return dc.Principal(uid=claims.uid, memberships=claims.groups)
+
+app.dependency_overrides[get_principal] = resolve
+```
+
+Semantics worth knowing:
+
+- The `acting_as` wrap sits **inside** each shipped closure — two concurrent
+  requests can never smear identities, and a raw `store.submit()` from your own
+  background code still runs as the ambient (operator) principal, unchanged.
+- A write denied by the commit gate (`WriteDeniedError` — below a protected
+  record's write floor, an authority ceiling violation, an anonymous protected
+  create) returns **403** with `{"error": "write-denied"}`; nothing committed,
+  no TID burned.
+- Build `Principal`s from verified claims — do not pass bare uids
+  (`acting_as(uid)` resolves through the Actor registry + sponsor gate, which is
+  for in-store identities).

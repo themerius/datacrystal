@@ -177,3 +177,16 @@ See also: [Snapshots, the commit stream, and the delta log](snapshots-and-delta-
 change-feed the coordinator serves), [Deploy behind FastAPI and GraphQL](web-deployment.md) (the
 broader `datacrystal[web]` doctrine), and the
 [federation reference](../reference.md#datacrystalweb-reflection-api).
+
+
+## Protected classes do not federate (yet)
+
+A federation contribution commits as the **anonymous** principal (identity
+honesty: the coordinator never signs third-party work with its operator's
+name). Since the write fence landed (ADR-008), anonymous can neither create
+protected records nor clear any write floor — so the coordinator refuses any
+`/v1/submit` op targeting a `protected=True` class **pre-flight with 403**
+(`{"error": "write-denied"}`), before anything is buffered. This is the
+ADR-008 R16 interim rule; per-follower principals are the deferred follow-up
+that lifts it. The FEDERATION-WIRE-v1 spec is unchanged — the 403 is an
+additive refusal outside the locked 409/422 discriminator set.

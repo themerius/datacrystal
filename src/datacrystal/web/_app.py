@@ -47,8 +47,10 @@ from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 
+from datacrystal._actors import Principal
+from datacrystal._errors import WriteDeniedError
 from datacrystal._snapshot import Snapshot
 from datacrystal._store import Store
 from datacrystal.web._strawberry import snapshot_context
@@ -56,6 +58,7 @@ from datacrystal.web._strawberry import snapshot_context
 __all__ = [
     "SNAPSHOT_CONTEXT_KEY",
     "create_app",
+    "get_principal",
     "get_store",
     "graphql_context_getter",
     "read_snapshot",
@@ -301,7 +304,36 @@ def read_snapshot(request: Request) -> Iterator[Snapshot]:
         pool.release(pooled)
 
 
-async def submit_write(request: Request) -> "_OwnerWriter":
+def get_principal() -> Principal | None:
+    """The per-request identity seam (epic #168 W2-8, ADR-008).
+
+    Default: ``None`` → every web write runs (and stamps) as the **anonymous**
+    principal — never the operator's store-opening identity: a request is a
+    third party's write, and stamping it with the ambient principal would put
+    remote work under the operator's name in the permanent audit log (the same
+    identity-honesty rule as federation contributions).
+
+    Apps override it FastAPI-style — the resolver may take its own
+    dependencies (headers, OIDC claims, sessions)::
+
+        def resolve(request: Request) -> dc.Principal | None:
+            claims = verify(request.headers.get("authorization"))
+            return dc.Principal(uid=claims.uid, memberships=claims.groups)
+
+        app.dependency_overrides[get_principal] = resolve
+
+    Return a **Principal object**, never a bare uid — ``acting_as(uid)``
+    resolves through the Actor registry with the sponsor gate, which is the
+    wrong semantics for verified-claims identities ("authenticate outside").
+    A denied write (``WriteDeniedError``) surfaces to the client as **403**.
+    """
+    return None
+
+
+async def submit_write(
+    request: Request,
+    principal: Principal | None = Depends(get_principal),
+) -> "_OwnerWriter":
     """Yield a callable that fans a mutation into the owner and returns committed.
 
     The **write** dependency: ``write: ... = Depends(submit_write)``. The route
@@ -319,7 +351,7 @@ async def submit_write(request: Request) -> "_OwnerWriter":
     entity in the result (even nested, or behind a ``Lazy``) fails with
     ``EntityEscapeError`` (the ``submit()`` contract); return an OID or a DTO.
     """
-    return _OwnerWriter(get_store(request))
+    return _OwnerWriter(get_store(request), principal)
 
 
 class _OwnerWriter:
@@ -331,18 +363,38 @@ class _OwnerWriter:
     typed method rather than an untyped lambda.
     """
 
-    __slots__ = ("_store",)
+    __slots__ = ("_store", "_principal")
 
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, principal: Principal | None = None) -> None:
         self._store = store
+        self._principal = principal
 
     async def __call__(self, fn: Callable[[Store], Any]) -> Any:
         store = self._store
+        # The acting_as wrap MUST live INSIDE the closure body: the store
+        # resets the acting stack to () around every submitted closure
+        # (queued work runs ambient — the W1 identity rule), so a wrap
+        # outside store.submit() would never reach the write. None → an
+        # explicit anonymous scope, never the operator's ambient identity.
+        principal = self._principal if self._principal is not None else Principal(uid=0)
+
+        def run() -> Any:
+            with store.acting_as(principal):
+                return fn(store)
+
         # submit() ships the closure to the owner; from the owner thread it runs
         # inline (same rules). wrap_future lets the loop await the owner's commit
         # without blocking (ADR-001 cross-thread write path).
-        future = store.submit(lambda: fn(store))
-        return await asyncio.wrap_future(future)
+        future = store.submit(run)
+        try:
+            return await asyncio.wrap_future(future)
+        except WriteDeniedError as exc:
+            # Local mapping (the _federation.py precedent) so hand-wired apps
+            # that never call create_app get it too. Denial happened in P1 —
+            # nothing committed, gapless TIDs (ADR-008 R10).
+            raise HTTPException(403, detail={
+                "error": "write-denied", "message": str(exc),
+            }) from exc
 
 
 #: The key under which :func:`graphql_context_getter` stashes the per-request
