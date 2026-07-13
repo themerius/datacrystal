@@ -717,6 +717,36 @@ store.commit()                             # stamped: actor=1
 - W1 ships **identity + stamps only**: no permission is checked anywhere yet. Floors and
   enforcement are `[planned — Permissions W2–W4]` (see the campaign milestone).
 
+## Protecting records (`protected=True`)
+
+One flag on the decorator marks a class's records as permission-carrying (ADR-008):
+
+```python
+@dc.entity(protected=True)
+class Contact:
+    name: Annotated[str, dc.Unique]
+```
+
+- The decorator injects four **lib-managed columns** (`_dc_owner`, `_dc_groups`,
+  `_dc_read_floor`, `_dc_write_floor`; `init=False` — your constructor signature is
+  untouched) and a read-only **`record.dc_permissions`** view returning a frozen
+  **`dc.Permissions`** struct (`owner`, `groups` as a point-in-time tuple, `read_floor`,
+  `write_floor`). A fresh record is born **owner-only**: `groups` empty, floors
+  `VIEWER` — inert until shared (owner stamping from the session principal lands with
+  W2-2 of this campaign).
+- The `_dc_` prefix and the name `dc_permissions` are **reserved on every entity
+  class** (protected or not): a user field with either raises `TypeError` at
+  decoration — an unprotected class carrying a `_dc_*` field would break the moment
+  `protected=True` retrofits it.
+- `_dc_read_floor` rides a sorted index (ADR-004), so range conditions over it are
+  bitmap-answerable — the read fence's substrate.
+- Unprotected classes are untouched: no injected fields, no view, zero cost.
+- Web reflection **never exposes the label columns**: no `entity_model` face carries
+  a `_dc_*` field, and client-supplied `_dc_*` keys are ignored on input.
+- Honesty note: in this release the columns are **carried, not yet enforced** — the
+  write fence (commit gate) and the read floors are `[planned — Permissions W2–W4]`;
+  the sharing verbs (`share`/`unshare`/`protect`) are `[planned — W2-4]`.
+
 ## Snapshots
 
 A snapshot is a frozen view of the committed state at one commit watermark, and the

@@ -53,6 +53,7 @@ from datacrystal._conditions import FieldExpr
 from datacrystal._containers import wrap_value
 from datacrystal._errors import FrozenEntityError, NotAnEntityError
 from datacrystal._lazy import Lazy
+from datacrystal._permissions import PERM_FIELDS, VIEWER, Permissions
 from datacrystal._state import STATE_NEW, touch
 
 
@@ -209,15 +210,20 @@ class FieldSpec:
 class TypeInfo:
     """Engine-side metadata for one entity class."""
 
-    __slots__ = ("cls", "typename", "field_names", "frozen", "_specs", "_defaults",
-                 "_spec_by_name", "_has_entity_refs")
+    __slots__ = ("cls", "typename", "field_names", "frozen", "protected", "_specs",
+                 "_defaults", "_spec_by_name", "_has_entity_refs")
 
     def __init__(self, cls: type, typename: str, field_names: tuple[str, ...],
-                 frozen: bool) -> None:
+                 frozen: bool, protected: bool = False) -> None:
         self.cls = cls
         self.typename = typename
         self.field_names = field_names
         self.frozen = frozen
+        # THE flag every permission path branches on (ADR-008): one bool per
+        # class — owner stamping (W2-2), the upsert label shield (W2-3), the
+        # commit gate (W2-5), the readable compiler (W3) all key off it;
+        # nothing ever sniffs field names.
+        self.protected = protected
         self._specs: tuple[FieldSpec, ...] | None = None
         self._defaults: dict[str, Any] | None = None
         self._spec_by_name: dict[str, FieldSpec] | None = None
@@ -321,26 +327,102 @@ def _frozen_setattr(self: Any, name: str, value: Any) -> None:
     )
 
 
+_PERM_FIELD_SET = frozenset(PERM_FIELDS)
+
+
+def _check_reserved(cls: type, name: str) -> None:
+    """The ``_dc_*`` prefix and ``dc_permissions`` are lib-reserved on EVERY
+    entity class (ADR-008 Context) — not just protected ones: an unprotected
+    class with a user ``_dc_owner`` field would be a silent landmine the
+    moment ``protected=True`` retrofits it (R7 makes retrofit a first-class
+    scenario). NB the deliberate, unrelated overload: PersistentList/Dict
+    carry a ``_dc_owner`` *slot* (the container's owning-entity backref) —
+    containers are not entities and are unaffected by this guard.
+    """
+    if name.startswith("_dc_") or name == "dc_permissions":
+        raise TypeError(
+            f"{cls.__name__}.{name}: the '_dc_' prefix and 'dc_permissions' are "
+            "reserved for datacrystal's lib-managed permission columns "
+            "(ADR-008); rename the field"
+        )
+
+
+def _inject_perm_columns(cls: type, annotations: dict[str, Any]) -> None:
+    """Add the four lib-managed label columns (ADR-008 Context) to the raw
+    class BEFORE ``dataclasses.dataclass()`` runs, so encoding, schema
+    lineage, indexes and snapshots all see them through existing machinery.
+
+    All four are ``init=False`` with defaults — the constructor signature is
+    untouched, and the defaults are the R6 BIRTH values (owner=0 'nobody'
+    until store()-time stamping, groups=∅, floors VIEWER — inert by
+    construction: with no groups, every non-owner's authority is NO_STANDING).
+    The R7 LEGACY fill (groups={PUBLIC}, write=ADMIN) is deliberately
+    DIFFERENT and lives in the decode-fill sites, never here.
+    ``_dc_read_floor`` carries SortedIndex (ADR-004 rule 3) so W3's ``<=``
+    composition stays bitmap-answerable.
+    """
+    annotations["_dc_owner"] = int
+    setattr(cls, "_dc_owner", dataclasses.field(default=0, init=False))
+    annotations["_dc_groups"] = list[int]
+    setattr(cls, "_dc_groups", dataclasses.field(default_factory=list[int], init=False))
+    annotations["_dc_read_floor"] = Annotated[int, SortedIndex]
+    setattr(cls, "_dc_read_floor", dataclasses.field(default=VIEWER, init=False))
+    annotations["_dc_write_floor"] = int
+    setattr(cls, "_dc_write_floor", dataclasses.field(default=VIEWER, init=False))
+
+
+def _permissions_view(self: Any) -> Permissions:
+    """The injected read-only ``dc_permissions`` property (protected classes
+    only): the four columns packaged as one frozen :class:`Permissions`.
+    ``groups`` copies to a tuple — the live owner-bound list never leaks
+    through the view.
+    """
+    return Permissions(
+        owner=self._dc_owner,
+        groups=tuple(self._dc_groups),
+        read_floor=self._dc_read_floor,
+        write_floor=self._dc_write_floor,
+    )
+
+
 @dataclass_transform(eq_default=False, field_specifiers=(dataclasses.field, dataclasses.Field))
-def entity(cls: type | None = None, /, *, frozen: bool = False):
+def entity(cls: type | None = None, /, *, frozen: bool = False, protected: bool = False):
     """Class decorator declaring a datacrystal entity.
 
     Applies ``@dataclass(slots=True, weakref_slot=True, eq=False)`` (entity
     equality is identity — there is exactly one live instance per OID), adds
     the engine slots and the dirty-tracking hook, and registers the type.
+
+    ``protected=True`` (ADR-008, epic #168) additionally injects the four
+    lib-managed permission columns (``init=False`` — the constructor is
+    untouched) and the read-only ``dc_permissions`` view. Everything else
+    about the class is unchanged; unprotected classes pay exactly nothing.
     """
 
     def wrap(c: type) -> type:
-        return _make_entity(c, frozen)
+        return _make_entity(c, frozen, protected)
 
     if cls is None:
         return wrap
-    return _make_entity(cls, frozen)
+    return _make_entity(cls, frozen, protected)
 
 
-def _make_entity(cls: type, frozen: bool) -> type:
+def _make_entity(cls: type, frozen: bool, protected: bool = False) -> type:
     if isinstance(cls, EntityMeta):
         raise TypeError(f"{cls.__name__} is already an @entity class")
+    # Reserved-name guard, then injection — both on the raw class's own
+    # materialized annotations dict, mutated IN PLACE (the only PEP-649-safe
+    # form; assigning a fresh dict breaks lazy-annotation classes).
+    annotations = cls.__annotations__
+    for name in annotations:
+        _check_reserved(cls, name)
+    if "dc_permissions" in vars(cls):
+        raise TypeError(
+            f"{cls.__name__}.dc_permissions: reserved for the lib-managed "
+            "permissions view (ADR-008); rename the attribute"
+        )
+    if protected:
+        _inject_perm_columns(cls, annotations)
     base = cast(
         "Any",
         dataclasses.dataclass(  # type: ignore[call-overload]
@@ -348,6 +430,12 @@ def _make_entity(cls: type, frozen: bool) -> type:
         )(cls),
     )
     field_names = tuple(f.name for f in dataclasses.fields(base))
+    # Belt and braces: a plain-dataclass parent can smuggle fields past the
+    # own-annotations check above; the injected four are exempt by name.
+    injected = _PERM_FIELD_SET if protected else frozenset[str]()
+    for name in field_names:
+        if name not in injected:
+            _check_reserved(cls, name)
     typename = f"{cls.__module__}:{cls.__qualname__}"
 
     namespace: dict[str, Any] = {
@@ -358,9 +446,11 @@ def _make_entity(cls: type, frozen: bool) -> type:
         "__new__": _entity_new,
         "__setattr__": _frozen_setattr if frozen else _tracked_setattr,
     }
+    if protected:
+        namespace["dc_permissions"] = property(_permissions_view)
     final = EntityMeta(cls.__name__, (base,), namespace)
 
-    info = TypeInfo(final, typename, field_names, frozen)
+    info = TypeInfo(final, typename, field_names, frozen, protected)
     # Resolve the field specs eagerly so a bad Index/Unique type (e.g.
     # Annotated[datetime, Index]) raises its TypeError at the @entity definition
     # site, not lazily on first commit() — far from the mistake (#19).

@@ -133,6 +133,12 @@ def reflect(cls: type) -> tuple[TypeInfo, tuple[FieldDescriptor, ...]]:
     hints = get_type_hints(cls, include_extras=True)
     descriptors: list[FieldDescriptor] = []
     for spec in info.specs:
+        if spec.name.startswith("_dc_"):
+            # Lib-managed permission columns (ADR-008): security labels must
+            # never ride REST/GraphQL DTOs — not readable in responses, not
+            # client-settable on any face. Every web surface builds on this
+            # reflection, so one skip covers them all.
+            continue
         hint = hints.get(spec.name, Any)
         descriptors.append(
             FieldDescriptor(
