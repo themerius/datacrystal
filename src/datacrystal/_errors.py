@@ -207,6 +207,21 @@ class UncommittedActorError(DataCrystalError):
     """
 
 
+class WriteDeniedError(DataCrystalError):
+    """A write to a protected record was denied (ADR-008 R10).
+
+    Raised in commit P1 **before the TID is allocated** — the sequence stays
+    gapless (invariant 5) and every buffered change stays intact: ``discard()``
+    or fix the labels/identity and re-commit. Covers all denial classes:
+    a buffered write (content, label change, or delete) below the target's
+    current write floor, a floor set above the setter's own authority (the
+    R8 ceiling, incl. sharing into a group without standing), and creating
+    a protected record as the anonymous principal (R6 — a record nobody
+    owns must not exist). Denial is deterministic — ``committing()`` never
+    retries it (unlike :class:`ConflictError`).
+    """
+
+
 class ConsumerDetachedWarning(UserWarning):
     """An attached delta consumer raised during delivery and was detached.
 

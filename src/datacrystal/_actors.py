@@ -22,10 +22,11 @@ semantics. Groups are the compartments that carry everything else —
 ``AGENT`` sits below ``AUTOMATION`` deliberately (an LLM agent is the least
 predictable writer; competence is not clearance).
 
-W1 scope (#171, stamped commits): pure data + the registry — **no
-enforcement**. Floors and the checks arrive with the write fence (W2) and
-read floors (W3/W4); until then Actor ships unprotected (the
-``protected=True`` facet does not exist yet).
+W1 shipped identity + stamps; W2 (ADR-008) flips :class:`Actor` to
+``protected=True`` — the shipped test case of the R7 legacy fill: W1-era
+rows decode read-as-before / ADMIN-write, new rows need a non-anonymous
+session. Read floors stay unenforced until W3/W4 — documented, not
+pretended.
 """
 
 from dataclasses import dataclass, field
@@ -84,7 +85,7 @@ class Principal:
     memberships: Mapping[int, int] = field(default_factory=dict[int, int])
 
 
-@entity
+@entity(protected=True)
 class Actor:
     """The shipped actor registry — one record per human or technical user.
 
@@ -100,8 +101,12 @@ class Actor:
     every non-human actor — ``acting_as()`` enforces that gate in core
     (accountability diffuses in groups; incident response needs a person).
 
-    Ships unprotected in W1; born-protected (write floor ADMIN) arrives with
-    the ``protected=True`` facet in W2 — documented, not pretended.
+    Born protected (W2, ADR-008): the registry that answers "who was allowed
+    to act?" must itself be fenced. Rows persisted by a W1-era store decode
+    under the R7 legacy fill — readable as before, writable only by a
+    store-wide ADMIN — and registering NEW actors requires a non-anonymous
+    session (open the store with ``principal=`` — the config-trusted
+    bootstrap, "authenticate outside").
     """
 
     uid: Annotated[int, Unique]

@@ -731,9 +731,13 @@ class Contact:
   `_dc_read_floor`, `_dc_write_floor`; `init=False` — your constructor signature is
   untouched) and a read-only **`record.dc_permissions`** view returning a frozen
   **`dc.Permissions`** struct (`owner`, `groups` as a point-in-time tuple, `read_floor`,
-  `write_floor`). A fresh record is born **owner-only**: `groups` empty, floors
-  `VIEWER` — inert until shared (owner stamping from the session principal lands with
-  W2-2 of this campaign).
+  `write_floor`). A fresh record is born **owner-only**: `_dc_owner` is stamped at
+  `store()` time from the session principal (a child first reached through a protected
+  container additionally inherits the container's groups + floors — write-time
+  inheritance; the owner is never inherited), `groups` empty, floors `VIEWER` — inert
+  until shared. Creating a protected record as the **anonymous** principal (uid 0)
+  raises `WriteDeniedError` — a record nobody owns must not exist; open the store with
+  `principal=` or wrap the write in `acting_as(...)`.
 - The `_dc_` prefix and the name `dc_permissions` are **reserved on every entity
   class** (protected or not): a user field with either raises `TypeError` at
   decoration — an unprotected class carrying a `_dc_*` field would break the moment
@@ -743,9 +747,18 @@ class Contact:
 - Unprotected classes are untouched: no injected fields, no view, zero cost.
 - Web reflection **never exposes the label columns**: no `entity_model` face carries
   a `_dc_*` field, and client-supplied `_dc_*` keys are ignored on input.
-- Honesty note: in this release the columns are **carried, not yet enforced** — the
-  write fence (commit gate) and the read floors are `[planned — Permissions W2–W4]`;
-  the sharing verbs (`share`/`unshare`/`protect`) are `[planned — W2-4]`.
+- **Retrofitting** `protected=True` onto a class with existing records is additive
+  (new lineage row; old records are never rewritten): legacy records decode as
+  owner `0` (nobody), groups `(PUBLIC,)`, read floor `VIEWER`, write floor `ADMIN` —
+  **readable exactly as before, writable only by a store-wide administrator** until
+  relabeled. `migrate()` materializes those values into real columns. The shipped
+  `dc.Actor` registry is itself protected under exactly this rule.
+- `upsert()` **never merges label columns** — an ETL probe instance's birth defaults
+  cannot reset a survivor's curated labels (`/v1/submit` rides upsert).
+- Honesty note: in this release the columns are **carried and stamped, not yet
+  fenced on write or read** — the commit write gate and the read floors are
+  `[planned — Permissions W2–W4]`; the sharing verbs (`share`/`unshare`/`protect`)
+  are `[planned — W2-4]`.
 
 ## Snapshots
 
@@ -1147,6 +1160,7 @@ Everything derives from `dc.DataCrystalError`:
 | `UnknownActorError` | `store.acting_as(uid)` found no `dc.Actor` row with that uid — register the actor, or pass a `dc.Principal` built from verified auth claims |
 | `SponsorRequiredError` | `acting_as(uid)` resolved a non-human actor whose sponsor gate fails — no `sponsor` named, or it doesn't resolve to a registered **human** actor (every technical user names a natural person who answers for it) |
 | `UncommittedActorError` | `acting_as(uid)` resolved an `Actor` row with buffered (uncommitted) changes — identity must be durable before it acts; commit the registry change first |
+| `WriteDeniedError` | a write to a protected record was denied (ADR-008): creating one as the anonymous principal, or — once the W2-5 commit gate lands — a write below the record's write floor / a floor above your own authority. Raised in P1 before the TID (gapless, invariant 5); buffered changes stay intact — `discard()` or fix and retry. Deterministic: `committing()` never retries it |
 | `ConflictError` | a federated `/v1/submit` OCC base token no longer matches the coordinator's current payload — the entity moved since it was read (→ HTTP 409; re-read and retry, never last-writer-wins). Carries `.key`, `.expected_base`, `.actual_base` (the conflict envelope) so a client can drive its re-read; `store.committing()` handles the retry for you |
 | `UnregisteredTypeError` | store has records of a class not imported in this process |
 | `NewerStoreError` | store written by a newer format version |

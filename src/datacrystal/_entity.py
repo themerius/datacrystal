@@ -41,12 +41,14 @@ from typing import (
     Any,
     Callable,
     Mapping,
+    TypeVar,
     Union,
     cast,
     dataclass_transform,
     get_args,
     get_origin,
     get_type_hints,
+    overload,
 )
 
 from datacrystal._conditions import FieldExpr
@@ -211,7 +213,7 @@ class TypeInfo:
     """Engine-side metadata for one entity class."""
 
     __slots__ = ("cls", "typename", "field_names", "frozen", "protected", "_specs",
-                 "_defaults", "_spec_by_name", "_has_entity_refs")
+                 "_defaults", "_spec_by_name", "_has_entity_refs", "_data_field_names")
 
     def __init__(self, cls: type, typename: str, field_names: tuple[str, ...],
                  frozen: bool, protected: bool = False) -> None:
@@ -228,6 +230,24 @@ class TypeInfo:
         self._defaults: dict[str, Any] | None = None
         self._spec_by_name: dict[str, FieldSpec] | None = None
         self._has_entity_refs: bool | None = None
+        self._data_field_names: tuple[str, ...] | None = None
+
+    @property
+    def data_field_names(self) -> tuple[str, ...]:
+        """``field_names`` minus the lib-managed ``_dc_`` label columns — the
+        fields merge-style writes (``upsert()``) may copy from a fresh
+        instance. IS ``field_names`` (the same tuple object) for unprotected
+        classes, so the unprotected path pays exactly nothing (W2-3: a fresh
+        instance carries R6 birth defaults; copying them over a survivor
+        would reset curated labels — and ``/v1/submit`` rides ``upsert``).
+        """
+        if not self.protected:
+            return self.field_names
+        cached = self._data_field_names
+        if cached is None:
+            cached = self._data_field_names = tuple(
+                n for n in self.field_names if n not in _PERM_FIELD_SET)
+        return cached
 
     @property
     def specs(self) -> tuple[FieldSpec, ...]:
@@ -385,8 +405,19 @@ def _permissions_view(self: Any) -> Permissions:
     )
 
 
+_TEntity = TypeVar("_TEntity")
+
+
+@overload
+def entity(cls: type[_TEntity], /) -> type[_TEntity]: ...
+@overload
+def entity(*, frozen: bool = False,
+           protected: bool = False) -> Callable[[type[_TEntity]], type[_TEntity]]: ...
+
+
 @dataclass_transform(eq_default=False, field_specifiers=(dataclasses.field, dataclasses.Field))
-def entity(cls: type | None = None, /, *, frozen: bool = False, protected: bool = False):
+def entity(cls: type | None = None, /, *, frozen: bool = False,
+           protected: bool = False) -> Any:
     """Class decorator declaring a datacrystal entity.
 
     Applies ``@dataclass(slots=True, weakref_slot=True, eq=False)`` (entity

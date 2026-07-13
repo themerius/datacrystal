@@ -39,7 +39,7 @@ def test_frozen_entity_rejects_mutation():
     entry = LogEntry(note="acquired")
     assert entry.note == "acquired"
     with pytest.raises(dc.FrozenEntityError):
-        entry.note = "edited"
+        entry.note = "edited"  # pyright: ignore[reportAttributeAccessIssue]  # negative test: frozen raise
 
 
 def test_class_access_yields_field_exprs_instance_access_values():

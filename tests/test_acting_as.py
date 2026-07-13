@@ -13,15 +13,20 @@ import datacrystal as dc
 
 ORG, TEAM = 1, 2
 
+# Actor is protected since W2 (ADR-008): registering actors needs a
+# non-anonymous session — the config-trusted bootstrap principal.
+BOOT = dc.Principal(uid=1)
+
 
 def _registry(store):
-    store.store(dc.Actor(uid=2, display="Anna", human=True,
-                         memberships={ORG: dc.STAFF, TEAM: dc.CURATOR}))
-    store.store(dc.Actor(uid=900, display="parser swarm", human=False, sponsor=2,
-                         memberships={TEAM: dc.AGENT}))
-    store.store(dc.Actor(uid=901, display="rogue swarm", human=False,
-                         memberships={TEAM: dc.AGENT}))
-    store.commit()
+    with store.acting_as(BOOT):
+        store.store(dc.Actor(uid=2, display="Anna", human=True,
+                             memberships={ORG: dc.STAFF, TEAM: dc.CURATOR}))
+        store.store(dc.Actor(uid=900, display="parser swarm", human=False, sponsor=2,
+                             memberships={TEAM: dc.AGENT}))
+        store.store(dc.Actor(uid=901, display="rogue swarm", human=False,
+                             memberships={TEAM: dc.AGENT}))
+        store.commit()
 
 
 class TestAmbientPrincipal:
@@ -184,11 +189,16 @@ class TestSubmittedWorkIdentity:
         which may sit INSIDE an acting_as scope. A queued foreign-thread
         closure must commit as the AMBIENT principal, never whatever scope
         the owner happened to be in when it pumped."""
+        from tests.conftest import Mineral
+
         collector = _StampCollector()
         store.attach(collector)
 
+        # NB deliberately an UNPROTECTED entity: the closure runs as the
+        # ambient (anonymous) principal, which since W2 cannot create
+        # protected records (ADR-008 R6) — Actor is protected now.
         def closure():
-            store.store(dc.Actor(uid=77, display="queued work", human=True))
+            store.store(Mineral(qid="Q-queued", name="queued work"))
             store.commit()
 
         futures = []
@@ -198,7 +208,7 @@ class TestSubmittedWorkIdentity:
 
         with store.acting_as(dc.Principal(uid=42)):
             store.count(dc.Actor)  # an owner API boundary → pumps the queue HERE
-            store.store(dc.Actor(uid=42, display="op", human=True))
+            store.store(dc.Actor(uid=42, display="op", human=True))  # scoped: allowed
             store.commit()  # the owner's OWN commit keeps the scoped stamp
 
         futures[0].result(timeout=5)
@@ -208,11 +218,14 @@ class TestSubmittedWorkIdentity:
 
 class TestRegistryGates:
     def test_sponsor_must_resolve_to_a_registered_human(self, store):
-        store.store(dc.Actor(uid=2, display="Anna", human=True))
-        store.store(dc.Actor(uid=900, display="bot", human=False, sponsor=2))
-        store.store(dc.Actor(uid=901, display="ghost-backed", human=False, sponsor=777))
-        store.store(dc.Actor(uid=902, display="bot-backed", human=False, sponsor=900))
-        store.commit()
+        with store.acting_as(BOOT):
+            store.store(dc.Actor(uid=2, display="Anna", human=True))
+            store.store(dc.Actor(uid=900, display="bot", human=False, sponsor=2))
+            store.store(dc.Actor(uid=901, display="ghost-backed", human=False,
+                                 sponsor=777))
+            store.store(dc.Actor(uid=902, display="bot-backed", human=False,
+                                 sponsor=900))
+            store.commit()
         with store.acting_as(900):
             pass  # human sponsor — fine
         with pytest.raises(dc.SponsorRequiredError, match="human"):
@@ -225,9 +238,10 @@ class TestRegistryGates:
     def test_uncommitted_actor_rows_refuse(self, store):
         """Identity must be durable before it acts: buffered registry edits
         would authorize stamps the replayed history cannot explain."""
-        store.store(dc.Actor(uid=900, display="bot", human=False))
-        store.store(dc.Actor(uid=2, display="Anna", human=True))
-        store.commit()
+        with store.acting_as(BOOT):
+            store.store(dc.Actor(uid=900, display="bot", human=False))
+            store.store(dc.Actor(uid=2, display="Anna", human=True))
+            store.commit()
         row = store.get(dc.Actor, uid=900)
         row.sponsor = 2  # buffered, NOT committed
         with pytest.raises(dc.UncommittedActorError):
@@ -238,7 +252,8 @@ class TestRegistryGates:
             pass
 
     def test_buffered_new_actor_is_not_actable(self, store):
-        store.store(dc.Actor(uid=5, display="new hire", human=True))  # uncommitted
+        with store.acting_as(BOOT):
+            store.store(dc.Actor(uid=5, display="new hire", human=True))  # uncommitted
         with pytest.raises(dc.UnknownActorError):
             with store.acting_as(5):
                 pass

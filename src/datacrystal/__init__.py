@@ -79,6 +79,7 @@ from datacrystal._errors import (
     UnregisteredTypeError,
     UnseenTypeWarning,
     UntrackedMutationWarning,
+    WriteDeniedError,
     WrongThreadError,
 )
 from datacrystal._indexes import QueryPlan
@@ -158,6 +159,7 @@ __all__ = [
     "UnknownActorError",
     "SponsorRequiredError",
     "UncommittedActorError",
+    "WriteDeniedError",
     "UnregisteredTypeError",
     "NewerStoreError",
     "CorruptRecordError",

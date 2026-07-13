@@ -55,6 +55,7 @@ from datacrystal._indexes import (
     windowed_index_order,
 )
 from datacrystal._lazy import Lazy
+from datacrystal._permissions import PERM_LEGACY_FILLS
 from datacrystal._records import BlobToken, RefToken, decode_payload
 from datacrystal._storage.protocol import StorageReadView
 
@@ -749,6 +750,13 @@ class Snapshot:
             for name in ti.field_names:
                 if name in by_name:
                     values[name] = _freeze(by_name[name])
+                    continue
+                if ti.protected and name in PERM_LEGACY_FILLS:
+                    # R7 legacy fill (ADR-008) — snapshots do NOT ride the
+                    # store's hydration plan, so the special case repeats
+                    # here from the same shared constant; a miss would give
+                    # web/GraphQL readers different labels than the live path.
+                    values[name] = _freeze(PERM_LEGACY_FILLS[name]())
                     continue
                 factory = ti.defaults.get(name)
                 if factory is None:

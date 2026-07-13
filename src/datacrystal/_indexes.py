@@ -39,6 +39,7 @@ from datacrystal._errors import (
     SchemaMismatchError,
     UniqueViolationError,
 )
+from datacrystal._permissions import PERM_LEGACY_FILLS
 from datacrystal._records import RefToken, decode_payload
 from datacrystal._storage.protocol import StorageBackend, StoredRecord
 
@@ -404,6 +405,13 @@ def build_class_indexes(
         colliding: str | None = None
         for name in maintained:
             if name in position:
+                continue
+            if ti.protected and name in PERM_LEGACY_FILLS:
+                # R7 legacy fill (ADR-008): index maintained _dc_ columns of
+                # pre-protection records with the legacy values (the sorted
+                # _dc_read_floor run would otherwise be poisoned for legacy
+                # rows). Same shared constant as the two decode sites.
+                fill[name] = PERM_LEGACY_FILLS[name]()
                 continue
             factory = ti.defaults.get(name)
             if factory is None:
