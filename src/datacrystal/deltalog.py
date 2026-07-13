@@ -4,7 +4,7 @@ stream (ROADMAP item 23, the first post-tag PR; promoted into early v0.x
 
 The watermark pipeline's third real consumer, and the one that finally
 gives the store an **audit history**: every acknowledged commit is one
-[COMMIT-DELTA-v1](../../docs/design/COMMIT-DELTA-v1.md) delta, and a
+[COMMIT-DELTA-v2](../../docs/design/COMMIT-DELTA-v2.md) delta, and a
 ``DeltaLog`` appends those deltas — byte-for-byte, in TID order — to an
 append-only file set. Replaying the log reconstructs the state at any past
 watermark (time-travel-by-replay), feeds a follower (the transport
@@ -75,6 +75,7 @@ from datacrystal._errors import DataCrystalError
 from datacrystal.contract.applier import (
     CONTRACT_VERSION,
     FORMAT_MARKER,
+    REQUIRED_KEYS,
     DeltaFormatError,
     DeltaGapError,
     ReferenceApplier,
@@ -121,7 +122,7 @@ class _Segment:
 
 
 class DeltaLog:
-    """A COMMIT-DELTA-v1 consumer that persists the delta stream.
+    """A COMMIT-DELTA-v2 consumer that persists the delta stream.
 
     Fresh store (records the whole history — fully replayable)::
 
@@ -233,17 +234,24 @@ class DeltaLog:
         """
         if delta.get("f") != FORMAT_MARKER:
             raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
-        if delta["v"] != CONTRACT_VERSION:
-            if delta["v"] > CONTRACT_VERSION:
+        version = delta.get("v")
+        if version != CONTRACT_VERSION:
+            if isinstance(version, int) and version > CONTRACT_VERSION:
                 raise DeltaFormatError(
-                    f"delta version {delta['v']} is newer than this log "
+                    f"delta version {version} is newer than this log "
                     f"supports ({CONTRACT_VERSION}); upgrade datacrystal"
                 )
             raise DeltaFormatError(
-                f"delta version {delta['v']} predates v{CONTRACT_VERSION} — "
+                f"delta version {version!r} predates v{CONTRACT_VERSION} — "
                 "incompatible (COMMIT-DELTA-v2 §7, no-compat): pre-v2 delta "
                 "logs are recreated from the live store, never migrated"
             )
+        # Validate the full required-key shape BEFORE buffering: a frame
+        # missing a required key would fsync fine but poison every later
+        # replay (the failure must land at write time, not read time).
+        for key in REQUIRED_KEYS:
+            if key not in delta:
+                raise DeltaFormatError(f"delta is missing required key {key!r}")
         tid = delta["tid"]
         if tid <= self._applied:
             return False  # §4.2: apply-twice ≡ apply-once
@@ -303,7 +311,7 @@ class DeltaLog:
         """Yield every recorded delta with ``tid > after_tid``, decoded, in
         TID order — from the durable segments first, then any buffered (not
         yet flushed) deltas. Pure read: it does not flush. The deltas are
-        exactly the COMMIT-DELTA-v1 maps the store emitted; feed them to a
+        exactly the COMMIT-DELTA-v2 maps the store emitted; feed them to a
         :class:`~datacrystal.contract.ReferenceApplier`, a fresh store, or a
         follower.
         """
@@ -457,6 +465,19 @@ class DeltaLog:
             raise DeltaLogConfigError(
                 f"delta-log format version {manifest['version']} is newer than "
                 f"this datacrystal supports ({LOG_VERSION})"
+            )
+        # No-compat (COMMIT-DELTA-v2 §7): a retained log holds exactly ONE
+        # contract version. A pre-v2 dir must refuse at reopen — silently
+        # appending v2 frames after a v1 prefix would poison every later
+        # replay and follower bootstrap with a mixed-version stream (the W1
+        # review's blocker finding). Never migrated, always recreated.
+        recorded = manifest.get("contract_version")
+        if recorded != CONTRACT_VERSION:
+            raise DeltaLogConfigError(
+                f"{path} records COMMIT-DELTA contract v{recorded}; this build "
+                f"emits v{CONTRACT_VERSION} — delta logs are never migrated "
+                "(COMMIT-DELTA-v2 §7): recreate the log from the live store "
+                "(remove the directory and attach a fresh DeltaLog)"
             )
         self._watermark = manifest["watermark"]
         self._applied = manifest["watermark"]

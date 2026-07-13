@@ -17,7 +17,7 @@ from typing import Annotated
 import pytest
 
 import datacrystal as dc
-from datacrystal.contract.applier import DeltaGapError, ReferenceApplier
+from datacrystal.contract.applier import DeltaFormatError, DeltaGapError, ReferenceApplier
 from datacrystal.deltalog import DeltaLog, DeltaLogConfigError
 from datacrystal.testing import check_delta_consumer
 
@@ -317,3 +317,43 @@ def test_replay_exposes_who_changed_what_when(store_factory, tmp_path) -> None:
     fetched = store.get(Cabinet, qid="Q1")
     assert fetched is not None and fetched.name == "drawer 7 (oxides)"
     store.close()
+
+
+def test_pre_v2_log_dir_refuses_at_reopen(store_factory, tmp_path) -> None:
+    """Review finding (BLOCKER): a pre-v2 log dir must refuse at REOPEN —
+    silently appending v2 frames after a v1 prefix would poison every later
+    replay and follower bootstrap with the mixed-version stream that
+    COMMIT-DELTA-v2 §7 forbids. Never migrated, always recreated."""
+    import json as _json
+
+    store = store_factory()
+    path = tmp_path / "vlog"
+    log = DeltaLog(path)
+    store.attach(log)
+    store.store(Cabinet(qid="Q1", name="drawer 7"))
+    store.commit()
+    store.close()
+
+    manifest = path / "manifest.json"
+    doctored = _json.loads(manifest.read_text())
+    doctored["contract_version"] = 1  # what a v0.8 log dir records
+    manifest.write_text(_json.dumps(doctored))
+
+    with pytest.raises(DeltaLogConfigError, match="never migrated"):
+        DeltaLog(path)
+
+
+def test_log_refuses_a_frame_missing_required_keys(store_factory, tmp_path) -> None:
+    """Review finding: the failure must land at WRITE time, not replay time —
+    a frame missing a required v2 key must never be fsynced (a poisoned
+    segment cannot be repaired; every later replay would raise)."""
+    log = fresh_log(tmp_path)
+    stamped = {
+        "f": "datacrystal-delta", "v": 2, "tid": 1,
+        "actor": 0, "at": 0, "ops": [], "types": [], "root": None,
+    }
+    truncated = {k: v for k, v in stamped.items() if k != "actor"}
+    with pytest.raises(DeltaFormatError, match="missing required key"):
+        log.apply(truncated)
+    assert log.watermark == 0
+    assert log.apply(stamped) is True  # the well-formed delta still lands

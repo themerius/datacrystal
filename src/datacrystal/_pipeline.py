@@ -1,6 +1,6 @@
 """Commit-delta emission and consumer attachment (the watermark pipeline).
 
-This is the engine side of [COMMIT-DELTA-v1](../../docs/design/COMMIT-DELTA-v1.md)
+This is the engine side of [COMMIT-DELTA-v2](../../docs/design/COMMIT-DELTA-v2.md)
 (ROADMAP item 3 — "the single most load-bearing undelivered component"): every
 acknowledged commit is describable as one delta; attached consumers receive the
 deltas in TID order, on the owner thread, strictly after the commit is durable.

@@ -20,7 +20,9 @@ edges + datetime Index/Unique keys + the nightly 1M lane; **0.8** = fractal foll
 (`datacrystal[follower]`: `web.federation_router` over FEDERATION-WIRE-v1, core
 `Store.follower`/`open_follower` + `sync()`/`discard()`/`committing()`, OCC via prior-payload
 digest).
-Extras are pre-tag contract validators, COMMIT-DELTA-v1 LOCKED, pyright-strict CI-gated. PyPI
+Extras are pre-tag contract validators, COMMIT-DELTA-v2 LOCKED (v1 retired 2026-07-12, no-compat
+hard cut: required `actor`/`at` stamps, exact-version consumers, pre-v2 logs recreate),
+pyright-strict CI-gated. PyPI
 publication deferred (names reserved). Releases run through `release.yml` (workflow_dispatch,
 pick bump) — never bump versions by hand.
 
@@ -138,7 +140,7 @@ stale venv shebangs — `rm -rf .venv && uv sync`.
 | Module | Role |
 |---|---|
 | `_store.py` | facade: open/root/store/delete/upsert/commit/get/query/explain/count/pluck/get_many/attach/detach/snapshot/open_blob; query/count/pluck/explain all take class-or-Condition (symmetry, 2026-06-12); explain() reports the two-rule QueryPlan — NEVER grow an optimizer (DuckDB over the mirror owns that tier); P1 capture (+ prior reads + delta build when consumers watch) → P2 backend I/O → P3 flip + delta delivery; type lineage + hydration plans; decode-level reads (count/pluck) construct no entities; deletes are unchecked per ADR-003 (DanglingRefError on follow); upsert merges into the surviving instance, writing only changed fields |
-| `_pipeline.py` | COMMIT-DELTA-v1 emission: `DeltaConsumer` protocol + `build_delta`; delivery in P3 post-durability; a raising consumer detaches loudly (never holds writes hostage) |
+| `_pipeline.py` | COMMIT-DELTA-v2 emission: `DeltaConsumer` protocol + `build_delta` (required `actor`/`at` stamps, keyword-only defaultless); delivery in P3 post-durability; a raising consumer detaches loudly (never holds writes hostage) |
 | `_snapshot.py` | `store.snapshot()` frozen `EntityView`/`Ref` reads at a commit watermark, callable from any thread (ADR-002 read views); bitmap `query()`/`count()` + `index_bitmaps()` over snapshot-local indexes rebuilt from the pinned view (never shared with the owner's) |
 | `testing.py` | public conformance kit `check_delta_consumer` + `CountingConsumer` (incl. the snapshot-bootstrap recipe for mid-life attach) |
 | `_entity.py` | `@entity` decorator → slots dataclass + engine slots; one-shot `__setattr__` dirty hook; `TypeInfo` (specs, defaults); metaclass turns class-attr access into query `FieldExpr`s |
@@ -153,7 +155,7 @@ stale venv shebangs — `rm -rf .venv && uv sync`.
 | `_storage/` | storage protocol (`boot/load_many/scan_type/apply/read_view` — growth needs an ADR, see ADR-002) + SQLite-blob backend + memory fake + lease lock |
 | `fts.py` | `datacrystal[fts]` extra (imports snowballstemmer — never from core): FTS5 sidecar consumer; fold/stem symmetry is BY CONSTRUCTION (same Python normalize-stem-fold on column content and query — never index raw text in a searchable column); stem-first-fold-after (Russian й/ё); raw text lives in UNINDEXED r_ columns for Python-side highlighting |
 | `arrow.py` | `datacrystal[arrow]` extra (imports pyarrow — never from core): persistent parquet mirrors; LSM segments + atomic fsync-ordered manifest.json; total type-promotion lattice with msgpack-binary fallback (schema evolution can never wedge it); newest-wins fold per OID; compact() ⇒ plain-parquet datalake dir; one owner process per mirror dir |
-| `deltalog.py` | retained delta log (ROADMAP item 23, first post-tag PR): CORE module — no extra, deps stay {msgspec, pyroaring}; a `DeltaConsumer` appending raw COMMIT-DELTA-v1 bytes (length-prefixed frames) to rolling segments behind an atomic fsync-ordered manifest (segment fsynced BEFORE manifest → watermark never lies); reopen truncates partial appends + sweeps orphan segments (exact gapless commit prefix); `replay()`/`replayed_state()` = time-travel-by-replay (faithful from watermark 0); `bootstrap()` mid-life attach records the change-feed from the join; engine still never retains (§5 unchanged); retention/pruning is the operator's policy |
+| `deltalog.py` | retained delta log (ROADMAP item 23, first post-tag PR): CORE module — no extra, deps stay {msgspec, pyroaring}; a `DeltaConsumer` appending raw COMMIT-DELTA-v2 bytes (length-prefixed frames; a pre-v2 log dir refuses at reopen — never migrated) to rolling segments behind an atomic fsync-ordered manifest (segment fsynced BEFORE manifest → watermark never lies); reopen truncates partial appends + sweeps orphan segments (exact gapless commit prefix); `replay()`/`replayed_state()` = time-travel-by-replay (faithful from watermark 0); `bootstrap()` mid-life attach records the change-feed from the join; engine still never retains (§5 unchanged); retention/pruning is the operator's policy |
 | `benchmarks/` (repo root) | KICKOFF §6 PR perf gates: same-run ratios only, warn until hardened (`DC_BENCH_STRICT=1`); `_gen.py` is the canonical scaled mineral-cabinet generator (Zipf hubs, provenance cycles, frozen events) |
 
 ## Load-bearing invariants (violating one = architectural regression, not a style issue)

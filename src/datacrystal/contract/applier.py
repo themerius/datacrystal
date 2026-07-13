@@ -36,6 +36,7 @@ else:
 __all__ = [
     "FORMAT_MARKER",
     "CONTRACT_VERSION",
+    "REQUIRED_KEYS",
     "DeltaFormatError",
     "DeltaGapError",
     "encode_delta",
@@ -46,7 +47,11 @@ __all__ = [
 FORMAT_MARKER = "datacrystal-delta"
 CONTRACT_VERSION = 2
 
-_REQUIRED_KEYS = ("f", "v", "tid", "actor", "at", "ops", "types", "root")
+# Public: the v2 delta's required top-level keys (spec §2) — consumers that
+# validate eagerly (e.g. the retained DeltaLog, which must never fsync a
+# frame that later replays cannot decode) share this one source of truth.
+REQUIRED_KEYS = ("f", "v", "tid", "actor", "at", "ops", "types", "root")
+_REQUIRED_KEYS = REQUIRED_KEYS
 _REQUIRED_OP_KEYS = ("op", "oid", "cid", "payload", "prior")
 
 

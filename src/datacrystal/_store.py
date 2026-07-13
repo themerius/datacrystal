@@ -81,6 +81,7 @@ from datacrystal._errors import (
     SchemaMismatchError,
     SponsorRequiredError,
     StoreClosedError,
+    UncommittedActorError,
     UniqueViolationError,
     UnknownActorError,
     UnregisteredTypeError,
@@ -155,7 +156,7 @@ class _Capture:
         self.index_entries = index_entries
         self.ref_entries = ref_entries  # (referrer oid, {target oids}) — #20
         self.flipped = flipped  # (oid, obj, state before the P1 flip)
-        self.delta = delta  # COMMIT-DELTA-v1 map; built only when consumers watch
+        self.delta = delta  # COMMIT-DELTA-v2 map; built only when consumers watch
         self.deletes = deletes  # (oid, ti, live instance or None) — ADR-003
         # (obj, field, blob_oid, size, hash): swap each committed streamed-write
         # source to a readable BlobHandle in P3, AFTER durability (ADR-007 §4).
@@ -295,7 +296,7 @@ class Store:
         # public API stays clock-free). Wall clocks step and skew, so TID
         # remains the only ordering truth (COMMIT-DELTA-v2 §5).
         self._clock: Callable[[], int] = time.time_ns
-        # COMMIT-DELTA-v1 consumers (ROADMAP item 3). Commits build and
+        # COMMIT-DELTA-v2 consumers (ROADMAP item 3). Commits build and
         # deliver deltas only while this list is non-empty — an unwatched
         # store pays nothing for the pipeline (spec §5).
         self._consumers: list[DeltaConsumer] = []
@@ -516,7 +517,10 @@ class Store:
 
         Under ``aopen()`` the scope is **task-confined** (contextvars): an
         ``acting_as`` held across an ``await`` never leaks into interleaved
-        tasks on the same loop — each task acts as itself.
+        tasks on the same loop — each task acts as itself. Read from a
+        foreign thread this deliberately answers (it is plain frozen data,
+        no live-graph access) with THAT thread's view: no scopes can exist
+        there, so it reports the ambient identity.
         """
         stack = self._acting.get()
         return stack[-1] if stack else self._principal
@@ -533,13 +537,22 @@ class Store:
         non-human actor without a sponsor cannot act.
 
         Scopes nest and the innermost wins; on exit the previous identity is
-        restored. ``commit()`` stamps whatever principal is in effect when it
-        runs (the committing identity, not the buffering one).
+        restored *in this task*. Under ``aopen()`` the scope is contextvar-
+        backed, so a task **spawned inside** the scope inherits the identity
+        and keeps it for its own lifetime even after this scope exits
+        (standard contextvar semantics) — spawn outside the scope, or open a
+        fresh ``acting_as`` inside the child task. ``commit()`` stamps
+        whatever principal is in effect when it runs (the committing
+        identity, not the buffering one). Registry resolution reads the
+        **committed** row only: an Actor with buffered edits refuses loudly.
 
         Raises:
             UnknownActorError: no ``dc.Actor`` row carries this uid.
-            SponsorRequiredError: the resolved actor is non-human and names
-                no sponsor (accountability needs a natural person).
+            UncommittedActorError: the resolved Actor row has buffered
+                (uncommitted) changes — commit the registry change first.
+            SponsorRequiredError: the resolved actor is non-human and its
+                sponsor gate fails — no sponsor named, or the sponsor does
+                not resolve to a registered human actor.
             WrongThreadError: called from a thread other than the store's
                 owner (ADR-001).
             StoreClosedError: the store has already been closed.
@@ -548,25 +561,57 @@ class Store:
         if isinstance(subject, Principal):
             principal = subject
         else:
-            actor = self.get(Actor, uid=subject)
-            if actor is None:
-                raise UnknownActorError(
-                    f"no dc.Actor with uid={subject} is registered in this "
-                    "store — store an Actor row first, or pass a dc.Principal "
-                    "directly when identity comes from verified auth claims"
-                )
-            if not actor.human and actor.sponsor is None:
-                raise SponsorRequiredError(
-                    f"actor uid={subject} ({actor.display or 'technical user'}) "
-                    "is non-human and names no sponsor — set Actor.sponsor to "
-                    "the natural person who answers for it"
-                )
+            actor = self._resolve_registry_actor(subject)
             principal = Principal(uid=actor.uid, memberships=dict(actor.memberships))
         token = self._acting.set((*self._acting.get(), principal))
         try:
             yield principal
         finally:
-            self._acting.reset(token)
+            try:
+                self._acting.reset(token)
+            except ValueError:
+                # The scope was finalized in a foreign context (e.g. a
+                # generator holding it was GC'd in another task) — reset
+                # cannot apply there; best-effort pop keeps the stack sane
+                # instead of dying with a raw ContextVar error.
+                stack = self._acting.get()
+                if stack and stack[-1] is principal:
+                    self._acting.set(stack[:-1])
+
+    def _resolve_registry_actor(self, uid: int) -> Any:
+        """Resolve ``uid`` through the committed Actor registry, enforcing the
+        gates: the row exists, is committed (identity must be durable before
+        it acts), and — for a non-human — names a sponsor that resolves to a
+        registered committed HUMAN actor (the natural person who answers).
+        """
+        actor = self.get(Actor, uid=uid)
+        if actor is None:
+            raise UnknownActorError(
+                f"no dc.Actor with uid={uid} is registered in this "
+                "store — store an Actor row first, or pass a dc.Principal "
+                "directly when identity comes from verified auth claims"
+            )
+        if state_of(actor) in (STATE_NEW, STATE_DIRTY):
+            raise UncommittedActorError(
+                f"the dc.Actor row for uid={uid} has uncommitted changes — "
+                "commit the registry change before acting as it (identity "
+                "must be durable before it acts)"
+            )
+        if not actor.human:
+            if actor.sponsor is None:
+                raise SponsorRequiredError(
+                    f"actor uid={uid} ({actor.display or 'technical user'}) "
+                    "is non-human and names no sponsor — set Actor.sponsor to "
+                    "the natural person who answers for it"
+                )
+            sponsor = self.get(Actor, uid=actor.sponsor)
+            if sponsor is None or not sponsor.human:
+                raise SponsorRequiredError(
+                    f"actor uid={uid} names sponsor {actor.sponsor}, which "
+                    "does not resolve to a registered human actor — the "
+                    "sponsor must be a natural person"
+                )
+        return actor
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -679,7 +724,7 @@ class Store:
         The follower constructor (ROADMAP item 21, FEDERATION-WIRE-v1) — the
         sibling of :meth:`open`: ``Store.open(path)`` opens a local single writer,
         ``Store.follower(url)`` opens a replica of a remote coordinator. It
-        bootstraps by replaying the coordinator's COMMIT-DELTA-v1 stream from TID 0
+        bootstraps by replaying the coordinator's COMMIT-DELTA-v2 stream from TID 0
         over ``GET /v1/deltas`` and returns a **real local** :class:`Store` you read
         at full local speed; :meth:`sync` catches it up, and ``upsert`` + ``commit``
         contributes back through the coordinator's single writer (use
@@ -1677,11 +1722,20 @@ class Store:
     def _execute_submission(self, fn: Callable[[], Any], future: Future[Any]) -> None:
         if not future.set_running_or_notify_cancel():
             return
+        # Identity isolation (epic #168 W1, review finding): the pump
+        # piggybacks on owner API calls, which may sit INSIDE an acting_as
+        # scope — a queued foreign-thread closure must never inherit that
+        # scoped identity (its commit would stamp another user's actor).
+        # Queued work always runs as the AMBIENT principal; a closure that
+        # should act as someone opens its own acting_as inside.
+        token = self._acting.set(())
         try:
             result = fn()
         except BaseException as exc:
             future.set_exception(exc)
             return
+        finally:
+            self._acting.reset(token)
         offender = _find_escapee(result)
         if offender is not None:
             future.set_exception(EntityEscapeError(
@@ -1693,7 +1747,7 @@ class Store:
         future.set_result(result)
 
     def attach(self, consumer: DeltaConsumer) -> None:
-        """Attach a COMMIT-DELTA-v1 consumer: from the next commit on it
+        """Attach a COMMIT-DELTA-v2 consumer: from the next commit on it
         receives every delta, in TID order, on the owner thread, strictly
         after the commit is durable (ROADMAP item 3; spec §4 obligations).
 

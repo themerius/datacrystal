@@ -136,7 +136,7 @@ class AsyncStore:
         return self._store.submit(fn)
 
     def attach(self, consumer: DeltaConsumer) -> None:
-        """Attach a COMMIT-DELTA-v1 consumer (delivered on the owner loop's
+        """Attach a COMMIT-DELTA-v2 consumer (delivered on the owner loop's
         thread during P3 — after ``await commit()`` resumes).
         """
         self._store.attach(consumer)
