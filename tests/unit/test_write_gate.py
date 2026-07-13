@@ -32,6 +32,7 @@ FAKE_ROOT = dc.Principal(uid=0, memberships={dc.PUBLIC: dc.EXECUTIVE})  # R7a
 class Contact:
     name: Annotated[str, dc.Unique]
     org: str = ""
+    link: "Contact | None" = None
 
 
 @dc.entity
@@ -201,6 +202,73 @@ class TestCeiling:
         with store.acting_as(OWNER_STAFF):             # floor now STAFF again
             c.org = "owner back in"
             store.commit()
+
+
+class TestInheritanceBaseline:
+    """The gate baseline for a NEW record is its birth/inherited labels, not
+    empty (review fix): inheritance is the library's policy — the container
+    was already shared by someone with standing — so the acting principal is
+    answerable only for what it stages ON TOP of it."""
+
+    def test_pure_inheritance_into_unheld_group_passes(self, store):
+        owner = dc.Principal(uid=3, memberships={TEAM: dc.CURATOR, ORG: dc.CURATOR})
+        with store.acting_as(owner):
+            parent = Contact(name="parent")
+            store.store(parent)
+            dc.share(parent, TEAM, read=dc.VIEWER, write=dc.AGENT)
+            dc.share(parent, ORG, read=dc.VIEWER, write=dc.AGENT)
+            store.commit()
+        with store.acting_as(AGENT_900):        # TEAM only, no ORG standing
+            parent.org = "dirtied"
+            kid = Contact(name="kid")
+            parent.link = kid                   # discovered via the container
+            store.commit()
+        kid = store.get(Contact, name="kid")
+        assert set(kid._dc_groups) == {TEAM, ORG}   # inherited both
+        assert kid._dc_owner == AGENT_900.uid
+
+    def test_explicit_share_beyond_inheritance_still_denied(self, store):
+        owner = dc.Principal(uid=3, memberships={TEAM: dc.CURATOR, ORG: dc.CURATOR})
+        with store.acting_as(owner):
+            parent = Contact(name="p3")
+            store.store(parent)
+            dc.share(parent, TEAM, read=dc.VIEWER, write=dc.AGENT)
+            store.commit()
+        FOREIGN = 99
+        with store.acting_as(AGENT_900):
+            parent.org = "d"
+            kid = Contact(name="k3")
+            parent.link = kid
+            dc.share(kid, FOREIGN, read=dc.VIEWER, write=dc.VIEWER)  # unheld, explicit
+            with pytest.raises(dc.WriteDeniedError, match="no standing"):
+                store.commit()
+            store.discard()
+
+    def test_explicit_floor_raise_on_new_record_denied(self, store):
+        with store.acting_as(AGENT_900):
+            c = Contact(name="raise-me")
+            store.store(c)
+            dc.share(c, TEAM, read=dc.VIEWER, write=dc.CURATOR)  # above AGENT
+            with pytest.raises(dc.WriteDeniedError, match="ceiling"):
+                store.commit()
+            store.discard()
+
+    def test_gapless_after_inheritance_baseline_denial(self, store):
+        with store.acting_as(OWNER_STAFF):
+            n = OpenNote(seq=7)
+            store.store(n)
+            tid = store.commit()
+        with store.acting_as(AGENT_900):
+            c = Contact(name="doomed-kid")
+            store.store(c)
+            dc.protect(c, write=dc.ADMIN)       # beyond agent ceiling
+            with pytest.raises(dc.WriteDeniedError):
+                store.commit()
+            store.discard()
+        with store.acting_as(OWNER_STAFF):
+            n2 = OpenNote(seq=8)
+            store.store(n2)
+            assert store.commit() == tid + 1    # invariant 5: denial burned no TID
 
 
 class TestRoot:

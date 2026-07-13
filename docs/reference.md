@@ -770,8 +770,11 @@ class Contact:
   Floors are per-record, not per-group. Verbs on a `frozen=True` record raise
   `FrozenEntityError` — a frozen record's labels are fixed at registration
   (container inheritance or birth defaults), MLS tranquility taken literally.
-  Labels staged with verbs *before* `store()` win over container inheritance
-  (inheritance fills only the untouched birth shape).
+  Labels staged to **non-default** values with verbs *before* `store()` are
+  preserved — inheritance fills only the untouched birth shape (owner-only,
+  `VIEWER` floors). A discovered child left at the birth defaults inherits its
+  container's labels; to keep such a child owner-only, relabel it *after*
+  `store()` rather than staging the (already-default) `VIEWER` values.
 - **The write fence is live** (ADR-008): every commit checks each buffered
   protected write — content, label change, or delete — against the record's
   *current persisted* write floor (**it binds everyone, including the owner** —
