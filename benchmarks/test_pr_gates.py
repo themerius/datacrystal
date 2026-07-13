@@ -369,3 +369,67 @@ def test_snapshot_open_read(big_store) -> None:
     engine = time_it(engine_run, rounds=3)
     gate("snapshot_open_read (snapshot open+read+close / owner read)",
          engine / floor, 25.0)
+
+
+def test_commit_gate_overhead(tmp_path) -> None:
+    """KICKOFF ``commit_gate_overhead`` (ADR-008 W2-9): a protected-class
+    UPDATE commit stays ≤ 2.0× its unprotected twin, same-run.
+
+    Budget derivation (the docstring the KICKOFF row cites): the fence's
+    marginal work on an update commit is (a) ONE batched ``load_many`` of the
+    delta's prior records — the same order of work as the commit's own apply,
+    (b) a partial decode of the four ``_dc_`` columns per prior — strictly
+    less than the full encode the commit already pays, (c) integer compares —
+    negligible. Gate work ≤ the commit's own encode+apply ⇒ ratio ≤ 2.0.
+    Discipline: UPDATE (DIRTY) commits — priors are the gate's cost center;
+    mutate a NON-indexed field so index maintenance is identical noise; NO
+    consumers attached (with consumers the plain path also reads priors and
+    the ratio flattens); a NON-root owner principal (root short-circuits
+    before the prior read — a root benchmark would time the bypass).
+    """
+    n = 200
+    owner = dc.Principal(uid=1001, memberships={dc.PUBLIC: dc.CURATOR})
+
+    prot_store = dc.Store.open(tmp_path / "protected.store", principal=owner)
+    plain_store = dc.Store.open(tmp_path / "plain.store", principal=owner)
+    mineral_p = _gen.Mineral(qid="QP0001", name="quartz", crystal_system="trigonal")
+    mineral_u = _gen.Mineral(qid="QU0001", name="quartz", crystal_system="trigonal")
+    prot_store.root = [mineral_p]
+    plain_store.root = [mineral_u]
+    curated = [
+        _gen.CuratedSpecimen(specimen_no=f"C-{i:05d}", mineral=dc.Lazy.of(mineral_p),
+                             quality="A", mass_g=10.0)
+        for i in range(n)
+    ]
+    plain = [
+        _gen.Specimen(specimen_no=f"P-{i:05d}", mineral=dc.Lazy.of(mineral_u),
+                      quality="A", mass_g=10.0)
+        for i in range(n)
+    ]
+    for s in curated:
+        prot_store.store(s)
+    for s in plain:
+        plain_store.store(s)
+    prot_store.commit()
+    plain_store.commit()
+
+    ticks = iter(range(10_000_000))
+
+    def prot_run() -> None:
+        bump = next(ticks)  # a fresh value every round — pending never empty
+        for s in curated:
+            s.mass_g = 10.0 + bump
+        prot_store.commit()
+
+    def plain_run() -> None:
+        bump = next(ticks)
+        for s in plain:
+            s.mass_g = 10.0 + bump
+        plain_store.commit()
+
+    t_prot = time_it(prot_run, rounds=3)
+    t_plain = time_it(plain_run, rounds=3)
+    gate("commit_gate_overhead (protected/unprotected update commit)",
+         t_prot / t_plain, 2.0)
+    prot_store.close()
+    plain_store.close()
