@@ -104,9 +104,14 @@ apply-once, gap refusal, and version refusal **in both directions** (§4.5).
   [FEDERATION-WIRE-v1](FEDERATION-WIRE-v1.md) frame layout (`>Q`
   length-prefixed `encode_delta` bytes) and endpoints are untouched;
   `GET /v1/head` self-describes the carried contract version (it serves the
-  shared constant). A pre-v2 follower MUST refuse v2 frames loudly — on
-  bootstrap *and* on catch-up (`sync()`) — never apply them silently; the
-  wire doc carries a dated amendment note recording the carried-version
+  shared constant). Follower-side version refusal is a **v2-build
+  guarantee**: this build refuses mismatched frames loudly on bootstrap
+  *and* on catch-up (`sync()` — the `_apply_catchup` version guard added in
+  W1). A **pre-v2 build** refuses only on bootstrap; its catch-up path had
+  no version check and applies v2 frames **silently** — so the upgrade rule
+  is operational, not code: stop or upgrade every follower **before** the
+  coordinator starts emitting v2, and never leave a pre-v2 replica syncing.
+  The wire doc carries a dated amendment note recording the carried-version
   advance.
 - **Why a bump at all** (and not v1's "unknown keys are ignored" loophole):
   emitting stamps under v1 would make audit fields droppable by contract
