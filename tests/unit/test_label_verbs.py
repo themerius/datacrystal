@@ -20,7 +20,7 @@ from datacrystal._errors import DeletedEntityError, FrozenEntityError, NotAnEnti
 from datacrystal._state import STATE_CLEAN, STATE_DIRTY
 
 ORG, TEAM = 1, 2
-ANNA = dc.Principal(uid=2, memberships={TEAM: dc.CURATOR})
+ANNA = dc.Principal(uid=2, memberships={ORG: dc.STAFF, TEAM: dc.CURATOR})
 LOW = dc.Principal(uid=900, memberships={TEAM: dc.AGENT})
 
 

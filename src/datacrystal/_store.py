@@ -91,7 +91,14 @@ from datacrystal._errors import (
     WrongThreadError,
 )
 from datacrystal._ids import FORMAT_VERSION, IdAllocator, OID_BASE, TID_BASE
-from datacrystal._permissions import PERM_LEGACY_FILLS
+from datacrystal._permissions import (
+    NO_STANDING,
+    PERM_FIELDS,
+    PERM_LEGACY_FILLS,
+    authority_towards,
+    is_root,
+    level,
+)
 from datacrystal._index_cache import IndexCache
 from datacrystal._indexes import (
     IndexManager,
@@ -124,6 +131,10 @@ from datacrystal.contract.applier import DeltaGapError
 # Exact-type membership for the hydration fast path (decode produces exact
 # builtin types, never subclasses — subclass-shaped values still take _resolve).
 _SCALAR_TYPES = frozenset((str, int, float, bool, bytes))
+
+# Sentinel for Store._perm_positions: "not computed yet" (None already means
+# a pre-protection lineage cid — the R7 legacy fill, ADR-008).
+_PERM_POS_UNSET: Any = object()
 
 _THREAD_RECIPE = (
     "live entities and their store are confined to the thread that opened the "
@@ -364,6 +375,10 @@ class Store:
             self._durable_cids.add(cid)
         self._ti_by_cid: dict[int, TypeInfo] = {}
         self._plan_by_cid: dict[int, list[tuple[Any, int | None, Any]]] = {}
+        # Per-cid positions of the four _dc_ columns in the persisted shape
+        # (None = a pre-protection cid → R7 legacy fill). The write gate's
+        # prior-label partial decode caches through here (W2-5).
+        self._perm_positions: dict[int, tuple[int, int, int, int] | None] = {}
         cached = (
             self._index_cache.read(self._last_tid)
             if use_cache and self._index_cache is not None else None
@@ -484,6 +499,10 @@ class Store:
             soon as one attempt commits.
 
         Raises:
+            WriteDeniedError: propagates UN-retried on the first attempt — a
+                permission denial is deterministic (ADR-008), not OCC: the
+                same principal re-denies forever; fix identity or labels, or
+                ``discard()``.
             ConflictError: a follower's write still conflicts after ``retries``
                 recoveries (the entity keeps moving — surface it to the caller).
             WrongThreadError: called off the owner thread (ADR-001).
@@ -1154,6 +1173,13 @@ class Store:
             DanglingRefError: only under ``strict_deletes=True`` — this commit
                 deletes a record another surviving record still points at
                 (the eager ADR-003 dangling-ref check).
+            WriteDeniedError: a buffered write to a protected record was
+                denied (ADR-008 R10): below the record's current write floor,
+                an R8 ceiling violation, or an anonymous protected create.
+                Like every P1 validation this fires before the TID — buffers
+                stay intact for ``discard()`` or a fixed-up retry (a denial
+                is deterministic: retrying under the same principal re-denies,
+                and ``committing()`` never auto-retries it).
             OverflowError: an integer field value is outside msgpack's
                 signed/unsigned 64-bit range.
             ValueError: a ``dc.BlobSource`` declared a size its bytes do not
@@ -1245,13 +1271,17 @@ class Store:
         # Validate before allocating the TID: a rejected commit must leave
         # the TID sequence gapless (replay determinism).
         index_entries: list[tuple[int, TypeInfo, dict[str, Any]]] = []
+        prot_pending: list[tuple[int, Any, TypeInfo]] = []
         for oid, obj in pending.items():
             ti = type_info(obj)
+            if ti.protected:  # collected for the write gate — free in this loop
+                prot_pending.append((oid, obj, ti))
             relevant = {s.name for s in ti.specs if s.indexed or s.unique or s.sorted}
             if relevant:
                 index_entries.append(
                     (oid, ti, {name: getattr(obj, name) for name in relevant})
                 )
+        prot_deletes = [(oid, ti) for oid, ti, _ in deletes if ti.protected]
         # #110: the eager dangling-ref check (debug/strict_deletes) needs the
         # reverse index BUILT to enumerate surviving referrers of a deleted OID
         # — force it before the ref-harvest gate so ref_entries is populated and
@@ -1277,6 +1307,15 @@ class Store:
         # aware values BEFORE the TID is allocated (gapless sequence, invariant 5)
         # — a mixed sorted run would raise a bare TypeError deep in bisect/insort.
         self._index.check_sorted_temporal(index_entries)
+        # The write gate (ADR-008, W2-5) — the consistency-before-commit family:
+        # a denial rejects like a unique violation, strictly pre-TID, and BEFORE
+        # the encode loop (a denied commit must not stream-hash blob sources).
+        # Runs only when something protected is buffered — an all-unprotected
+        # commit does literally zero gate work (W2-9's structural gate pins it).
+        gate_records: dict[int, StoredRecord] = (
+            self._check_write_gate(prot_pending, prot_deletes)
+            if prot_pending or prot_deletes else {}
+        )
         new_types: list[tuple[int, str, list[str]]] = []
         encoded: list[tuple[int, int, bytes]] = []
         # Out-of-line blob values this commit writes (ADR-007 / #82). Each
@@ -1365,7 +1404,14 @@ class Store:
         if self._consumers:
             persisted_oids = [oid for oid in pending if oid not in self._new]
             want = persisted_oids + [oid for oid, _, _ in deletes]
-            prior_records = self._backend.load_many(want) if want else {}
+            # Merge with the write gate's loads: a protected prior is read
+            # exactly once even when consumers watch. The `if self._consumers:`
+            # guard itself stays — spec §5, an unwatched store pays nothing
+            # for DELTA priors (the gate pays only for protected records).
+            missing = [oid for oid in want if oid not in gate_records]
+            prior_records = dict(gate_records)
+            if missing:
+                prior_records.update(self._backend.load_many(missing))
             for oid in persisted_oids:
                 rec = prior_records.get(oid)
                 if rec is None:
@@ -1436,6 +1482,114 @@ class Store:
         self._deleted.clear()
         return _Capture(tid, batch, index_entries, ref_entries, flipped, delta,
                         deletes, blob_swaps)
+
+    def _prior_labels(self, rec: StoredRecord) -> tuple[int, list[int], int, int]:
+        """The four ``_dc_`` label values from a PRIOR persisted payload —
+        decode-level (constructs no entities, touches no registry; the
+        count()/pluck() doctrine). A cid whose persisted shape lacks the
+        columns predates protection → the R7 legacy fill, from the same
+        shared constant every decode site uses (never the R6 birth
+        defaults: that would read legacy write floors as VIEWER —
+        world-writable, R7 inverted). Positions cache per cid.
+        """
+        pos = self._perm_positions.get(rec.cid, _PERM_POS_UNSET)
+        if pos is _PERM_POS_UNSET:
+            persisted = self._persisted_fields.get(rec.cid, [])
+            try:
+                pos = cast(
+                    "tuple[int, int, int, int]",
+                    tuple(persisted.index(n) for n in PERM_FIELDS),
+                )
+            except ValueError:
+                pos = None  # pre-protection lineage → R7
+            self._perm_positions[rec.cid] = pos
+        if pos is None:
+            owner, groups, read_floor, write_floor = (
+                PERM_LEGACY_FILLS[n]() for n in PERM_FIELDS
+            )
+            return owner, groups, read_floor, write_floor
+        values = decode_payload(rec.payload)
+        return (values[pos[0]], list(values[pos[1]]), values[pos[2]], values[pos[3]])
+
+    def _check_write_gate(
+        self,
+        prot_pending: list[tuple[int, Any, TypeInfo]],
+        prot_deletes: list[tuple[int, TypeInfo]],
+    ) -> dict[int, StoredRecord]:
+        """The ADR-008 write fence, in P1 strictly before the TID (R10):
+        every buffered protected write — content, label change, or delete —
+        must clear the record's CURRENT (persisted) write floor, and every
+        CHANGED floor must be ≤ the committing principal's own authority
+        (the R8 ceiling; unchanged floors never block a pure content edit,
+        which is also what keeps ``migrate()``'s verbatim re-stages legal).
+        The one bypass is root (R9) — decided from the principal alone, so
+        it short-circuits before any prior I/O; root commits still stamp.
+
+        Returns the prior records it loaded so the delta-priors block reads
+        each protected prior exactly once. Denial = ``WriteDeniedError``
+        with the buffers intact (``discard()`` or fix and retry — the
+        defined W2-6 state); ``committing()`` never retries it (denial is
+        deterministic, not OCC).
+        """
+        p = self.principal
+        if is_root(p):
+            return {}
+        persisted_oids = [oid for oid, _, _ in prot_pending if oid not in self._new]
+        persisted_oids += [oid for oid, _ in prot_deletes]
+        records = self._backend.load_many(persisted_oids) if persisted_oids else {}
+        labels: dict[int, tuple[int, list[int], int, int]] = {}
+        for oid, rec in records.items():
+            labels[oid] = self._prior_labels(rec)
+
+        def deny(msg: str) -> None:
+            raise WriteDeniedError(f"{msg} — as principal uid={p.uid}; the buffer "
+                                   "is intact: discard() or fix and re-commit "
+                                   "(ADR-008)")
+
+        for oid, obj, ti in prot_pending:
+            prior = labels.get(oid)
+            if prior is None:
+                # NEW record: no floor to clear. The anonymous case is
+                # normally refused at the stamp site (W2-2); this closes the
+                # remaining paths (e.g. debug-mode rescue of an unstamped
+                # instance) identically.
+                if p.uid == 0:
+                    deny(f"cannot create a protected {ti.cls.__name__} as the "
+                         "anonymous principal (a record nobody owns must not "
+                         "exist, R6/R7a)")
+            else:
+                held = authority_towards(p, prior[0], prior[1])
+                if held < prior[3]:
+                    deny(f"write to {ti.cls.__name__} oid={oid} denied: the "
+                         f"record's write floor is {prior[3]} and your "
+                         f"authority towards it is {held} (the floor binds "
+                         "everyone, including the owner — the curation "
+                         "guarantee)")
+            staged_groups = list(obj._dc_groups)
+            ceiling = authority_towards(p, obj._dc_owner, staged_groups)
+            prior_groups: set[int] = set(prior[1]) if prior is not None else set()
+            for g in set(staged_groups) - prior_groups:
+                if level(p, g) == NO_STANDING:
+                    deny(f"cannot share {ti.cls.__name__} oid={oid} into group "
+                         f"{g}: you hold no standing there (R8 — cross-group "
+                         "handoff goes through someone who holds both groups)")
+            for label_name, staged, was in (
+                ("read", obj._dc_read_floor, prior[2] if prior else None),
+                ("write", obj._dc_write_floor, prior[3] if prior else None),
+            ):
+                if (prior is None or staged != was) and staged > ceiling:
+                    deny(f"cannot set {ti.cls.__name__} oid={oid} {label_name} "
+                         f"floor to {staged}: your own authority towards the "
+                         f"record is {ceiling} (R8 ceiling — a label write is "
+                         "a write, bounded by what you hold)")
+        for oid, ti in prot_deletes:
+            owner, groups, _read, write_floor = labels[oid]
+            held = authority_towards(p, owner, groups)
+            if held < write_floor:
+                deny(f"delete of {ti.cls.__name__} oid={oid} denied: its write "
+                     f"floor is {write_floor} and your authority towards it "
+                     f"is {held} (a delete is a write)")
+        return records
 
     def _run_p2(self, batch: CommitBatch) -> None:
         """P2: backend I/O on bytes only, off the owner thread."""
@@ -2179,6 +2333,14 @@ class Store:
                 class's shape (a removed-then-re-added field with no default
                 or ``Glue``, or a damaged record) — run :meth:`verify` first
                 to surface these without mutating anything.
+            WriteDeniedError: a rewritten protected record's write floor is
+                not cleared by the migrating principal (ADR-008 — migrate
+                rides the normal commit machine, so the gate applies per
+                chunk; legacy records carry the R7 ``ADMIN`` floor, so run a
+                migration as a store-wide admin or root). A mid-run denial
+                leaves earlier chunks durable; after fixing the identity the
+                run resumes idempotently. :meth:`verify` is read-only and is
+                never gated.
             LeaseLostError: this process lost the single-writer lease while
                 migrating (invariant 10); a partial run just resumes on the
                 next call (it is TID-gapless and idempotent).

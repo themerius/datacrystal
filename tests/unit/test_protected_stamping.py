@@ -18,7 +18,6 @@ import pytest
 import datacrystal as dc
 from datacrystal._entity import TYPES_BY_NAME, type_info
 from datacrystal._errors import WriteDeniedError
-from datacrystal._state import STATE_DIRTY
 
 ORG = 1
 ANNA = dc.Principal(uid=2, memberships={ORG: dc.CURATOR})
@@ -232,8 +231,11 @@ class TestLegacyFill:
                     name=(Annotated[str, dc.Unique], REQUIRED),
                     grade=(Annotated[str, dc.Index], "common"))
         s = store_factory()
-        with s.acting_as(ANNA):
-            assert s.migrate() == 1                    # one legacy row rewritten
+        with s.acting_as(ANNA):                        # CURATOR < the R7 ADMIN floor
+            with pytest.raises(dc.WriteDeniedError):
+                s.migrate()                            # W2-6: migrate rides the gate
+        with s.acting_as(dc.Principal(uid=9, memberships={dc.PUBLIC: dc.ADMIN})):
+            assert s.migrate() == 1                    # store-wide admin clears R7
         s.close()
         s2 = store_factory()
         row = s2.get(V2, name="w1-era")
@@ -370,17 +372,13 @@ def test_retrofit_invalidates_the_index_cache(tmp_path):
     s2.close()
 
 
-def test_dirty_write_of_existing_protected_record_is_ungated_in_w2_2(store):
-    # Honesty pin: W2-2 stamps, it does not FENCE — the write gate is W2-5.
+def test_anonymous_dirty_write_is_now_fenced(store):
+    # W2-5 flipped the W2-2-era honesty pin: the gate binds every write path.
     with store.acting_as(ANNA):
-        g = Gem(name="pre-fence")
+        g = Gem(name="fenced")
         store.store(g)
         store.commit()
-    g.name = "pre-fence-edited"                        # anonymous dirty write
-    assert state_of_dirty(g)
-    store.commit()                                     # passes until W2-5 lands
-
-
-def state_of_dirty(obj) -> bool:
-    from datacrystal._entity import state_of
-    return state_of(obj) == STATE_DIRTY
+    g.name = "fenced-edited"                           # anonymous dirty write
+    with pytest.raises(dc.WriteDeniedError):
+        store.commit()
+    store.discard()                                    # the documented way out

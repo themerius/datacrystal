@@ -93,7 +93,7 @@ def test_columns_roundtrip_through_commit_and_reopen(store_factory):
         s1.store(spec)
         spec._dc_read_floor = dc.AGENT
         spec._dc_write_floor = dc.CURATOR
-        spec._dc_groups.append(42)
+        spec._dc_groups.append(7)   # a group she holds (R8)
         s1.commit()
     assert spec._dc_owner == 2          # stamped at store() time (W2-2)
     s1.close()
@@ -105,7 +105,7 @@ def test_columns_roundtrip_through_commit_and_reopen(store_factory):
     assert back._dc_owner == 2
     assert back._dc_read_floor == dc.AGENT
     assert back._dc_write_floor == dc.CURATOR
-    assert list(back._dc_groups) == [42]
+    assert list(back._dc_groups) == [7]
     s2.close()
 
 
