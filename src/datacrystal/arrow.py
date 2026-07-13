@@ -4,7 +4,7 @@
 The watermark pipeline's *second* real consumer, and the measured answer to
 projection/range analytics over millions of records (the MaStR feedback's
 63-second one-column read): every committed entity of a mirrored type
-becomes a row in a per-type Arrow table, kept current from COMMIT-DELTA-v1
+becomes a row in a per-type Arrow table, kept current from COMMIT-DELTA-v2
 deltas and persisted as parquet — DuckDB/polars/pandas read
 ``mirror.table(Specimen)`` zero-copy, and the data directory itself is a
 parquet datalake after ``compact()`` (ROADMAP item 16's positioning).
@@ -301,7 +301,7 @@ class _TableState:
 
 
 class ArrowMirror:
-    """A COMMIT-DELTA-v1 consumer mirroring committed entities to parquet.
+    """A COMMIT-DELTA-v2 consumer mirroring committed entities to parquet.
 
     Fresh store::
 
@@ -388,14 +388,15 @@ class ArrowMirror:
     def apply(self, delta: dict[str, Any]) -> bool:
         if delta.get("f") != FORMAT_MARKER:
             raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
-        if delta["v"] != CONTRACT_VERSION:
-            if delta["v"] > CONTRACT_VERSION:
+        version = delta.get("v")
+        if version != CONTRACT_VERSION:
+            if isinstance(version, int) and version > CONTRACT_VERSION:
                 raise DeltaFormatError(
-                    f"delta version {delta['v']} is newer than this mirror "
+                    f"delta version {version} is newer than this mirror "
                     f"supports ({CONTRACT_VERSION}); upgrade datacrystal[arrow]"
                 )
             raise DeltaFormatError(
-                f"delta version {delta['v']} predates v{CONTRACT_VERSION} — "
+                f"delta version {version!r} predates v{CONTRACT_VERSION} — "
                 "incompatible (COMMIT-DELTA-v2 §7, no-compat): rebuild the mirror"
             )
         tid = delta["tid"]

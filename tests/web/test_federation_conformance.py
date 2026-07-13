@@ -550,3 +550,57 @@ def test_served_deltalog_honors_the_consumer_contract(
         consumer.apply(delta)
     assert consumer.watermark == served[-1]["tid"]
     assert consumer.content().get(_MINERAL, 0) >= 2  # at least the seeded Q1/Q2
+
+
+# --- W1 (epic #168): contributions stamp anonymous, never the operator ---------
+
+
+@pytest.mark.parametrize("backend_kind", ["memory", "sqlite"])
+def test_contributions_stamp_anonymous_not_the_operator(backend_kind, tmp_path) -> None:
+    """Review finding (HIGH): /v1/submit used to commit under the coordinator's
+    ambient principal — remote third-party writes would land in the permanent
+    audit log under the OPERATOR's identity. Until per-follower principals
+    (phase 3), a contribution stamps anonymous (actor=0): 'identity not
+    known', never 'the operator did this'. The operator's own commits keep
+    their stamp — both proven over the real wire."""
+    operator = dc.Principal(uid=42)
+    if backend_kind == "memory":
+        backend = MemoryBackend()
+
+        def open_store() -> dc.Store:
+            return dc.Store._from_backend(backend, principal=operator)  # pyright: ignore[reportPrivateUsage]
+    else:
+
+        def open_store() -> dc.Store:
+            return dc.Store.open(tmp_path / "coord42", principal=operator)
+
+    server = _CoordinatorServer(open_store, log_dir=str(tmp_path / "coordlog42"))
+    server.start()
+    try:
+        follower = dc.open_follower(server.base_url, path=None)
+        try:
+            follower.store(Mineral(qid="Q9", name="Fluorite", crystal_system="cubic"))
+            follower.commit()  # contributes through POST /v1/submit
+        finally:
+            follower.close()
+        with httpx.Client(base_url=server.base_url) as client:
+            blob = client.get("/v1/deltas", params={"after": 0}).content
+        import struct as _struct
+
+        from datacrystal.contract.applier import decode_delta as _dd
+
+        deltas, offset = [], 0
+        while offset < len(blob):
+            (size,) = _struct.unpack_from(">Q", blob, offset)
+            offset += 8
+            deltas.append(_dd(blob[offset : offset + size]))
+            offset += size
+        assert deltas[0]["actor"] == 42  # the operator's own seeding commit
+        contribution = deltas[-1]
+        assert any(
+            op["payload"] is not None and b"Fluorite" in op["payload"]
+            for op in contribution["ops"]
+        )
+        assert contribution["actor"] == 0  # third-party write: anonymous, honest
+    finally:
+        server.stop()

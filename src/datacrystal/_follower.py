@@ -1,7 +1,7 @@
 """``open_follower`` — a local replica synced from a coordinator (ROADMAP item 21).
 
 A follower runs the **same codebase** as the coordinator; role is config. It
-bootstraps by pulling the coordinator's COMMIT-DELTA-v1 stream from TID 0
+bootstraps by pulling the coordinator's COMMIT-DELTA-v2 stream from TID 0
 (``GET /v1/deltas?after=0`` on the [FEDERATION-WIRE-v1](../../docs/design/FEDERATION-WIRE-v1.md)
 surface) and turning it into a **real local** :class:`~datacrystal._store.Store`
 it then reads at full speed — no snapshot encoder, no per-call round-trips.
@@ -67,7 +67,7 @@ def _iter_frames(blob: bytes) -> Iterator[dict[str, Any]]:
 def _delta_to_batch(
     delta: dict[str, Any], max_oid: int, max_cid: int, root: int | None
 ) -> tuple[CommitBatch, int, int, int | None]:
-    """Reverse one COMMIT-DELTA-v1 delta into a CommitBatch with the coordinator's
+    """Reverse one COMMIT-DELTA-v2 delta into a CommitBatch with the coordinator's
     own OIDs/TIDs, advancing the OID/CID/root high-water marks.
 
     The synthesized meta lands the follower's watermark (``next_tid - 1``,
@@ -149,14 +149,15 @@ def _apply_catchup(backend: StorageBackend, deltas: Iterable[dict[str, Any]]) ->
     for delta in deltas:
         if delta.get("f") != FORMAT_MARKER:
             raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
-        if delta["v"] != CONTRACT_VERSION:
-            if delta["v"] > CONTRACT_VERSION:
+        version = delta.get("v")
+        if version != CONTRACT_VERSION:
+            if isinstance(version, int) and version > CONTRACT_VERSION:
                 raise DeltaFormatError(
-                    f"delta version {delta['v']} is newer than this follower "
+                    f"delta version {version} is newer than this follower "
                     f"supports ({CONTRACT_VERSION}); upgrade datacrystal"
                 )
             raise DeltaFormatError(
-                f"delta version {delta['v']} predates v{CONTRACT_VERSION} — "
+                f"delta version {version!r} predates v{CONTRACT_VERSION} — "
                 "incompatible (COMMIT-DELTA-v2 §7, no-compat): re-bootstrap "
                 "this follower from a v2 coordinator"
             )

@@ -1,6 +1,6 @@
 """``datacrystal[fts]`` — the SQLite FTS5 full-text sidecar (ROADMAP item 10).
 
-The first *real* COMMIT-DELTA-v1 consumer: it rides the watermark pipeline
+The first *real* commit-delta consumer (COMMIT-DELTA-v2): it rides the watermark pipeline
 exactly like the M3 contract spike (``tests/contract/fts_consumer.py``, its
 embryo) and delivers what the spike's honesty notes deferred — index-time
 Snowball stemming per ``dc.FullText(language=...)``, per-field exact and
@@ -203,7 +203,7 @@ _Needles = dict[str, list[list[str]]]
 
 
 class FullTextIndex:
-    """A COMMIT-DELTA-v1 consumer indexing ``dc.FullText`` fields into FTS5.
+    """A COMMIT-DELTA-v2 consumer indexing ``dc.FullText`` fields into FTS5.
 
     Fresh store::
 
@@ -293,14 +293,15 @@ class FullTextIndex:
     def apply(self, delta: dict[str, Any]) -> bool:
         if delta.get("f") != FORMAT_MARKER:
             raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
-        if delta["v"] != CONTRACT_VERSION:
-            if delta["v"] > CONTRACT_VERSION:
+        version = delta.get("v")
+        if version != CONTRACT_VERSION:
+            if isinstance(version, int) and version > CONTRACT_VERSION:
                 raise DeltaFormatError(
-                    f"delta version {delta['v']} is newer than this index "
+                    f"delta version {version} is newer than this index "
                     f"supports ({CONTRACT_VERSION}); upgrade datacrystal[fts]"
                 )
             raise DeltaFormatError(
-                f"delta version {delta['v']} predates v{CONTRACT_VERSION} — "
+                f"delta version {version!r} predates v{CONTRACT_VERSION} — "
                 "incompatible (COMMIT-DELTA-v2 §7, no-compat): rebuild the index"
             )
         tid = delta["tid"]

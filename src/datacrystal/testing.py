@@ -113,7 +113,7 @@ def check_delta_consumer(
     *,
     content: Callable[[Any], Any] | None = None,
 ) -> list[str]:
-    """Certify a COMMIT-DELTA-v1 consumer against the spec §4 obligations.
+    """Certify a COMMIT-DELTA-v2 consumer against the spec §4 obligations.
 
     ``factory`` must return a FRESH consumer at watermark 0 on every call.
     Returns the list of section labels that ran (so a test can assert the
@@ -322,14 +322,15 @@ class CountingConsumer:
     def apply(self, delta: dict[str, Any]) -> bool:
         if delta.get("f") != FORMAT_MARKER:
             raise DeltaFormatError(f"not a datacrystal delta: f={delta.get('f')!r}")
-        if delta["v"] != CONTRACT_VERSION:
-            if delta["v"] > CONTRACT_VERSION:
+        version = delta.get("v")
+        if version != CONTRACT_VERSION:
+            if isinstance(version, int) and version > CONTRACT_VERSION:
                 raise DeltaFormatError(
-                    f"delta version {delta['v']} is newer than this consumer "
+                    f"delta version {version} is newer than this consumer "
                     f"supports ({CONTRACT_VERSION}); upgrade the consumer"
                 )
             raise DeltaFormatError(
-                f"delta version {delta['v']} predates v{CONTRACT_VERSION} — "
+                f"delta version {version!r} predates v{CONTRACT_VERSION} — "
                 "incompatible (COMMIT-DELTA-v2 §7, no-compat): recreate the stream"
             )
         tid = delta["tid"]

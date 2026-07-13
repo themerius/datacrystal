@@ -163,3 +163,82 @@ class TestOwnerConfinement:
         t.join()
         assert len(caught) == 1 and isinstance(caught[0], dc.WrongThreadError)
         assert store.principal == dc.Principal(uid=0)  # nothing leaked
+
+
+class _StampCollector:
+    """Minimal consumer recording every delta's (tid, actor)."""
+
+    def __init__(self) -> None:
+        self.watermark = 0
+        self.stamps: list[tuple[int, int]] = []
+
+    def apply(self, delta):
+        self.stamps.append((delta["tid"], delta["actor"]))
+        self.watermark = delta["tid"]
+        return True
+
+
+class TestSubmittedWorkIdentity:
+    def test_pumped_closures_run_ambient_never_the_owners_scope(self, store):
+        """Review finding (HIGH): the pump piggybacks on owner API calls —
+        which may sit INSIDE an acting_as scope. A queued foreign-thread
+        closure must commit as the AMBIENT principal, never whatever scope
+        the owner happened to be in when it pumped."""
+        collector = _StampCollector()
+        store.attach(collector)
+
+        def closure():
+            store.store(dc.Actor(uid=77, display="queued work", human=True))
+            store.commit()
+
+        futures = []
+        t = threading.Thread(target=lambda: futures.append(store.submit(closure)))
+        t.start()
+        t.join()
+
+        with store.acting_as(dc.Principal(uid=42)):
+            store.count(dc.Actor)  # an owner API boundary → pumps the queue HERE
+            store.store(dc.Actor(uid=42, display="op", human=True))
+            store.commit()  # the owner's OWN commit keeps the scoped stamp
+
+        futures[0].result(timeout=5)
+        actors = [actor for _tid, actor in collector.stamps]
+        assert actors == [0, 42]  # queued work: ambient; owner's work: scoped
+
+
+class TestRegistryGates:
+    def test_sponsor_must_resolve_to_a_registered_human(self, store):
+        store.store(dc.Actor(uid=2, display="Anna", human=True))
+        store.store(dc.Actor(uid=900, display="bot", human=False, sponsor=2))
+        store.store(dc.Actor(uid=901, display="ghost-backed", human=False, sponsor=777))
+        store.store(dc.Actor(uid=902, display="bot-backed", human=False, sponsor=900))
+        store.commit()
+        with store.acting_as(900):
+            pass  # human sponsor — fine
+        with pytest.raises(dc.SponsorRequiredError, match="human"):
+            with store.acting_as(901):  # sponsor uid never registered
+                pass
+        with pytest.raises(dc.SponsorRequiredError, match="human"):
+            with store.acting_as(902):  # sponsored by another bot
+                pass
+
+    def test_uncommitted_actor_rows_refuse(self, store):
+        """Identity must be durable before it acts: buffered registry edits
+        would authorize stamps the replayed history cannot explain."""
+        store.store(dc.Actor(uid=900, display="bot", human=False))
+        store.store(dc.Actor(uid=2, display="Anna", human=True))
+        store.commit()
+        row = store.get(dc.Actor, uid=900)
+        row.sponsor = 2  # buffered, NOT committed
+        with pytest.raises(dc.UncommittedActorError):
+            with store.acting_as(900):
+                pass
+        store.commit()  # now durable
+        with store.acting_as(900):
+            pass
+
+    def test_buffered_new_actor_is_not_actable(self, store):
+        store.store(dc.Actor(uid=5, display="new hire", human=True))  # uncommitted
+        with pytest.raises(dc.UnknownActorError):
+            with store.acting_as(5):
+                pass

@@ -3,7 +3,7 @@
 :func:`federation_router` mounts the LOCKED
 [FEDERATION-WIRE-v1](../../../docs/design/FEDERATION-WIRE-v1.md) contract
 (ROADMAP item 21, epic #146): ``GET /v1/head`` (the watermark probe a follower
-polls), ``GET /v1/deltas?after=<tid>`` (COMMIT-DELTA-v1 frames — byte-for-byte
+polls), ``GET /v1/deltas?after=<tid>`` (COMMIT-DELTA-v2 frames — byte-for-byte
 the length-prefixed frame the :class:`~datacrystal.deltalog.DeltaLog` already
 writes, re-encoded from :meth:`~datacrystal.deltalog.DeltaLog.replay`), and
 ``POST /v1/submit`` (contribute: a follower's writes fanned into the single writer
@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pydantic
 from fastapi import APIRouter, Body, HTTPException, Query, Response
 
+from datacrystal._actors import Principal
 from datacrystal._entity import TYPES_BY_NAME, oid_of
 from datacrystal._errors import (
     ERROR_CONFLICT,
@@ -55,6 +56,10 @@ if TYPE_CHECKING:
 # (``deltalog.py``) and LOCKED by FEDERATION-WIRE-v1. A change here is a new
 # contract version, never an edit.
 _FRAME = struct.Struct(">Q")
+
+# What /v1/submit contributions are stamped as (epic #168 W1): the truthful
+# "identity not known" until per-follower principals land (phase 3).
+_ANONYMOUS = Principal(uid=0)
 
 __all__ = ["federation_router"]
 
@@ -98,7 +103,7 @@ def federation_router(
         }
 
     async def deltas(after: int = Query(0, ge=0)) -> Response:
-        """COMMIT-DELTA-v1 frames with ``tid > after``, in strict TID order.
+        """COMMIT-DELTA-v2 frames with ``tid > after``, in strict TID order.
 
         The body is zero or more ``[>Q length][encode_delta(delta)]`` frames —
         the exact bytes a follower applies through the reference applier. ``after``
@@ -217,28 +222,38 @@ def federation_router(
             # 409-rejected contribution silently durable + replicated. discard()
             # (owner thread, here) clears the buffer so a failed batch leaves the
             # store exactly as it was. The happy path commits and never discards.
-            try:
-                survivors: dict[Any, Any] = {}
-                for info, key, base, dto in prepared:
-                    value = getattr(dto, key)
-                    # OCC (#155): the carried base must equal the current payload hash.
-                    # current is None ⇔ key absent; this single check covers all cases —
-                    # stale update, insert of an existing key, and update with no base.
-                    current = store._payload_digest(info, key, value)  # pyright: ignore[reportPrivateUsage]
-                    if current != base:
-                        raise ConflictError(
-                            f"{info.typename}.{key}={value!r}: base {base!r} does not "
-                            f"match current {current!r} — re-read and retry",
-                            key=value,
-                            expected_base=base,
-                            actual_base=current,
+            #
+            # Identity honesty (epic #168 W1, review finding): a contribution is
+            # a THIRD PARTY's write — stamping it with the coordinator operator's
+            # ambient principal would put remote work under the operator's name
+            # in the permanent audit log. Until per-follower principals land
+            # (Permissions phase 3), every contribution stamps anonymous
+            # (actor=0): "identity not known", never "the operator did this".
+            with store.acting_as(_ANONYMOUS):
+                try:
+                    survivors: dict[Any, Any] = {}
+                    for info, key, base, dto in prepared:
+                        value = getattr(dto, key)
+                        # OCC (#155): the carried base must equal the current payload hash.
+                        # current is None ⇔ key absent; this single check covers all cases —
+                        # stale update, insert of an existing key, and update with no base.
+                        current = store._payload_digest(info, key, value)  # pyright: ignore[reportPrivateUsage]
+                        if current != base:
+                            raise ConflictError(
+                                f"{info.typename}.{key}={value!r}: base {base!r} does not "
+                                f"match current {current!r} — re-read and retry",
+                                key=value,
+                                expected_base=base,
+                                actual_base=current,
+                            )
+                        survivor = store.upsert(
+                            from_pydantic(dto, info.cls, store=store), key=key
                         )
-                    survivor = store.upsert(from_pydantic(dto, info.cls, store=store), key=key)
-                    survivors[value] = survivor
-                applied_tid = store.commit()
-            except BaseException:
-                store.discard()  # drop the rejected batch's buffered writes (all-or-nothing)
-                raise
+                        survivors[value] = survivor
+                    applied_tid = store.commit()
+                except BaseException:
+                    store.discard()  # drop the rejected batch's buffered writes (all-or-nothing)
+                    raise
             return {
                 "applied_tid": applied_tid,
                 "keys": {value: oid_of(obj) for value, obj in survivors.items()},

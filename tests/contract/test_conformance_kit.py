@@ -213,3 +213,17 @@ def test_missing_prior_value_twin_fails_the_prior_section():
     with pytest.raises(AssertionError) as failure:
         check_delta_consumer(_StalePrior, content=lambda c: c.content())
     assert "§3 prior un-index" in str(failure.value)
+
+
+def test_garbage_or_missing_version_is_a_format_error_not_a_crash():
+    """Review finding: a delta with a missing or non-int `v` must refuse with
+    the typed DeltaFormatError — never a raw KeyError/TypeError from the
+    comparison (the hand-rolled checks mirror the applier's defensive shape)."""
+    base = {
+        "f": "datacrystal-delta", "v": CONTRACT_VERSION, "tid": 1,
+        "actor": 0, "at": 0, "ops": [], "types": [], "root": None,
+    }
+    for evil in ({k: v for k, v in base.items() if k != "v"},
+                 {**base, "v": "2"}, {**base, "v": 2.0 + 1e-9}, {**base, "v": None}):
+        with pytest.raises(DeltaFormatError):
+            CountingConsumer().apply(evil)

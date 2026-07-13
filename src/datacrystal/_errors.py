@@ -186,12 +186,24 @@ class UnknownActorError(DataCrystalError):
 
 
 class SponsorRequiredError(DataCrystalError):
-    """``store.acting_as(uid)`` resolved a non-human actor with no sponsor.
+    """``store.acting_as(uid)`` resolved a non-human actor whose sponsor gate
+    fails: no sponsor named, or the named sponsor does not resolve to a
+    registered **human** actor.
 
     The sponsor gate (epic #168): every technical user names a natural
     person who answers for it — accountability diffuses in groups, and
     incident response needs a person to call (the EU AI Act Art. 26(2)
     human-oversight designation). Set ``Actor.sponsor`` to a human's uid.
+    """
+
+
+class UncommittedActorError(DataCrystalError):
+    """``store.acting_as(uid)`` resolved an ``Actor`` row with uncommitted
+    changes (buffered NEW or DIRTY state).
+
+    Identity must be durable before it acts: a membership or sponsor edit
+    that never commits would otherwise authorize stamps the replayed
+    registry history cannot explain. Commit the registry change first.
     """
 
 

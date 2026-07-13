@@ -693,8 +693,9 @@ store.commit()                             # stamped: actor=1
   `store.principal` reads the one in effect:
 
   ```python
+  quartz = store.get(Mineral, qid="Q43010")
   with store.acting_as(900):        # uid → registry lookup + sponsor gate
-      c.name = "Meyer GmbH"
+      quartz.name = "rock crystal"
       store.commit()                # stamped: actor=900
 
   claims = dc.Principal(uid=41, memberships={TEAM: dc.STAFF})   # from OIDC claims
@@ -703,9 +704,16 @@ store.commit()                             # stamped: actor=1
   ```
 
   Scopes nest (innermost wins); the stamp is the **committing** identity — writes
-  buffered under A but committed under B stamp B. A uid that resolves to a non-human
-  `Actor` without a sponsor raises `SponsorRequiredError`; an unregistered uid raises
-  `UnknownActorError`.
+  buffered under A but committed under B stamp B. Registry resolution reads the
+  **committed** row only (`UncommittedActorError` otherwise); a uid whose sponsor gate
+  fails raises `SponsorRequiredError`; an unregistered uid raises `UnknownActorError`.
+- **Identity boundaries, stated plainly:** queued `store.submit()` work always runs as
+  the **ambient** principal (never whatever scope the owner happened to be in when it
+  pumped — open an `acting_as` inside the closure to act as someone); under `aopen()` a
+  task spawned **inside** a scope inherits that identity for its own lifetime (contextvar
+  semantics) — spawn outside the scope or re-scope in the child; a federation
+  `/v1/submit` contribution commits as **anonymous** (`actor=0`) — per-follower
+  principals are `[planned — Permissions W2–W4]`.
 - W1 ships **identity + stamps only**: no permission is checked anywhere yet. Floors and
   enforcement are `[planned — Permissions W2–W4]` (see the campaign milestone).
 
@@ -1107,7 +1115,8 @@ Everything derives from `dc.DataCrystalError`:
 | `SchemaMismatchError` | a class change beyond additive evolution (see [the schema-evolution how-to](how-to/schema-evolution.md)) |
 | `SchemaSkewError` | a federated `/v1/submit` contribution carries a field the coordinator's class lacks (cid-lineage skew → HTTP 409; [FEDERATION-WIRE-v1](design/FEDERATION-WIRE-v1.md)) |
 | `UnknownActorError` | `store.acting_as(uid)` found no `dc.Actor` row with that uid — register the actor, or pass a `dc.Principal` built from verified auth claims |
-| `SponsorRequiredError` | `acting_as(uid)` resolved a non-human actor with no `sponsor` — every technical user names a natural person who answers for it (the sponsor gate) |
+| `SponsorRequiredError` | `acting_as(uid)` resolved a non-human actor whose sponsor gate fails — no `sponsor` named, or it doesn't resolve to a registered **human** actor (every technical user names a natural person who answers for it) |
+| `UncommittedActorError` | `acting_as(uid)` resolved an `Actor` row with buffered (uncommitted) changes — identity must be durable before it acts; commit the registry change first |
 | `ConflictError` | a federated `/v1/submit` OCC base token no longer matches the coordinator's current payload — the entity moved since it was read (→ HTTP 409; re-read and retry, never last-writer-wins). Carries `.key`, `.expected_base`, `.actual_base` (the conflict envelope) so a client can drive its re-read; `store.committing()` handles the retry for you |
 | `UnregisteredTypeError` | store has records of a class not imported in this process |
 | `NewerStoreError` | store written by a newer format version |

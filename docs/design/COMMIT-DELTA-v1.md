@@ -1,6 +1,11 @@
 # COMMIT-DELTA-v1 — the commit-delta / watermark contract
 
-Status: **v1 — LOCKED** (2026-06-12, binding at the v0.1.0 tag). Revisions
+Status: **v1 — SUPERSEDED 2026-07-12 by [COMMIT-DELTA-v2](COMMIT-DELTA-v2.md)**
+(epic #168 W1, the no-compat hard cut: v1 streams are recreated, never
+migrated; v2 consumers refuse `v == 1` loudly). Retained as history AND as
+the section home v2 §1 carries verbatim (this document's §2 encoding of
+ops, §3 operations, §4 obligations 1–4, §5 non-goals). Originally: LOCKED
+2026-06-12, binding at the v0.1.0 tag. Revisions
 from here are a new contract version, never an edit.
 Ratified scope: [ROADMAP.md](ROADMAP.md) item 3 — "the single most load-bearing
 undelivered component". The draft could change with explicit draft-rev bumps

@@ -1,7 +1,7 @@
-"""COMMIT-DELTA-v1 contract package (DRAFT rev 1) — engine-free.
+"""COMMIT-DELTA-v2 contract package — engine-free.
 
 The reference applier and codec for the commit-delta/watermark stream
-(ROADMAP item 3; spec: docs/design/COMMIT-DELTA-v1.md). Nothing in here
+(ROADMAP item 3; spec: docs/design/COMMIT-DELTA-v2.md). Nothing in here
 imports the engine — the fitness suite asserts that mechanically.
 """
 
