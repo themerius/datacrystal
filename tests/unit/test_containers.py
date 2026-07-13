@@ -152,7 +152,7 @@ def test_frozen_entity_containers_raise_after_commit(store_factory):
     store.root = {"log": [entry]}
     store.commit()
     with pytest.raises(FrozenEntityError):
-        store.root["log"][0].note = "edited"
+        store.root["log"][0].note = "edited"  # pyright: ignore[reportAttributeAccessIssue]  # negative test: frozen raise
     store.close()
 
 

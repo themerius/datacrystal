@@ -87,9 +87,11 @@ from datacrystal._errors import (
     UnregisteredTypeError,
     UnseenTypeWarning,
     UntrackedMutationWarning,
+    WriteDeniedError,
     WrongThreadError,
 )
 from datacrystal._ids import FORMAT_VERSION, IdAllocator, OID_BASE, TID_BASE
+from datacrystal._permissions import PERM_LEGACY_FILLS
 from datacrystal._index_cache import IndexCache
 from datacrystal._indexes import (
     IndexManager,
@@ -1083,7 +1085,11 @@ class Store:
                 "with the store — upsert fresh (untracked) instances or the "
                 "canonical instance"
             )
-        for name in ti.field_names:
+        # data_field_names: the _dc_ label columns are NEVER merged (W2-3,
+        # ADR-008) — a fresh probe instance carries R6 birth defaults, and
+        # copying them would reset the survivor's curated labels (and
+        # /v1/submit rides upsert). IS field_names for unprotected classes.
+        for name in ti.data_field_names:
             new = getattr(obj, name)
             cur = getattr(existing, name)
             if not _equivalent(cur, new):
@@ -2506,9 +2512,14 @@ class Store:
     def _register_graph(self, obj: Any, walked: set[int] | None = None) -> int:
         if walked is None:
             walked = set()
-        queue: deque[Any] = deque([obj])
+        # Queue entries carry the ENQUEUING protected container (or None):
+        # a fresh protected child inherits its container's groups + floors at
+        # registration — write-time inheritance, ADR-008 / epic #168 W2-2.
+        # Unprotected containers always pass None, so the unprotected walk
+        # does no label work.
+        queue: deque[tuple[Any, Any]] = deque([(obj, None)])
         while queue:
-            current = queue.popleft()
+            current, container = queue.popleft()
             if state_of(current) == STATE_DELETED:
                 raise DeletedEntityError(
                     f"this {type(current).__name__} was deleted via "
@@ -2516,7 +2527,21 @@ class Store:
                     "new entity instead (OIDs are never reused)"
                 )
             oid = oid_of(current)
+            fresh = oid is None
             if oid is None:
+                ti = type_info(current)
+                if ti.protected and self.principal.uid == 0:
+                    # R6 (derived): a record nobody owns must not be creatable
+                    # — refused BEFORE the entity is stamped or buffered, so a
+                    # doomed record never enters the buffer (commit-retry could
+                    # not re-stamp it; only discard() could). P1-discovered
+                    # children hit this pre-TID too (invariant 5).
+                    raise WriteDeniedError(
+                        f"cannot create a protected {type(current).__name__} as "
+                        "the anonymous principal (uid 0) — a record nobody owns "
+                        "must not exist (ADR-008 R6/R7a); open the store with "
+                        "principal=... or wrap the write in store.acting_as(...)"
+                    )
                 oid = self._alloc.next_oid()
                 stamp(current, oid, self, state_of(current))
                 self._new[oid] = current
@@ -2525,15 +2550,40 @@ class Store:
             walked.add(oid)
             if oid in self._new or oid in self._dirty:
                 ti = type_info(current)
+                if fresh and ti.protected:
+                    self._stamp_perm_labels(current, container)
                 # Flat-entity fast-path (#52): a type none of whose fields can
                 # hold an entity ref (a SOR row of scalars/strings, FKs kept as
                 # plain str) has nothing to discover — skip the per-field walk
                 # entirely. has_entity_refs mirrors _walk_value's leaf set, so a
                 # ref-bearing field is never wrongly skipped.
                 if ti.has_entity_refs:
+                    child_container = current if ti.protected else None
                     for name in ti.field_names:
-                        self._walk_value(getattr(current, name), queue)
+                        self._walk_value(getattr(current, name), queue,
+                                         child_container)
         return oid_of(obj)  # type: ignore[return-value]
+
+    def _stamp_perm_labels(self, obj: Any, container: Any) -> None:
+        """Birth labels for a fresh protected record (ADR-008 R6, first
+        registration wins — this runs exactly once, from the ``fresh`` branch
+        of :meth:`_register_graph`).
+
+        ``_dc_owner`` = the acting principal's uid — NEVER inherited (R6
+        provenance; a legacy container would otherwise mint owner=0 children).
+        Groups + both floors copy from the enqueuing protected container when
+        there is one (write-time inheritance — labels are decided at write
+        time and stay stable, the concept's tranquility rule); a record with
+        no protected container keeps the inert R6 defaults. ``object.__setattr__``
+        is deliberate: frozen-safe (mirrors ``_fill_entity``), and the entity
+        is already buffered in ``self._new`` — no dirty-hook work needed.
+        """
+        object.__setattr__(obj, "_dc_owner", self.principal.uid)
+        if container is not None:
+            groups = wrap_value(list(container._dc_groups), obj)
+            object.__setattr__(obj, "_dc_groups", groups)
+            object.__setattr__(obj, "_dc_read_floor", container._dc_read_floor)
+            object.__setattr__(obj, "_dc_write_floor", container._dc_write_floor)
 
     def _discover_new_graphs(self) -> None:
         """P1 discovery: dirty/new objects may reference brand-new entities."""
@@ -2541,23 +2591,24 @@ class Store:
         for obj in [*self._new.values(), *self._dirty.values()]:
             self._register_graph(obj, walked)
 
-    def _walk_value(self, value: Any, queue: deque[Any]) -> None:
+    def _walk_value(self, value: Any, queue: deque[tuple[Any, Any]],
+                    container: Any = None) -> None:
         if value is None or isinstance(value, (str, float, int, bytes)):
             return  # overwhelmingly the common case: scalars reference nothing
         if is_entity(value):
             oid = oid_of(value)
             if oid is None or oid in self._new or oid in self._dirty:
-                queue.append(value)
+                queue.append((value, container))
         elif isinstance(value, Lazy):
             target = cast("Lazy[Any]", value).peek()
             if target is not None:
-                self._walk_value(target, queue)
+                self._walk_value(target, queue, container)
         elif isinstance(value, (list, tuple)):
             for item in cast("tuple[Any, ...]", value):
-                self._walk_value(item, queue)
+                self._walk_value(item, queue, container)
         elif isinstance(value, dict):
             for item in cast("dict[Any, object]", value).values():
-                self._walk_value(item, queue)
+                self._walk_value(item, queue, container)
 
     def _harvest_live_refs(self, obj: Any) -> set[int]:
         """The OIDs ``obj`` references — direct entity refs and Lazy refs, in
@@ -2730,6 +2781,14 @@ class Store:
                     # only; never rewrites the record). Distinguished from a
                     # plain default by ``spec.glue`` in the fill loops.
                     plan.append((spec, None, None))
+                    continue
+                if ti.protected and spec.name in PERM_LEGACY_FILLS:
+                    # R7 legacy fill (ADR-008): a persisted shape lacking the
+                    # _dc_ columns predates protection — read-as-before,
+                    # ADMIN-write; NOT the R6 birth defaults (write_floor
+                    # would come out VIEWER = world-writable, the exact
+                    # inversion of R7). One shared constant, three fill sites.
+                    plan.append((spec, None, PERM_LEGACY_FILLS[spec.name]))
                     continue
                 factory = ti.defaults.get(spec.name)
                 if factory is None:

@@ -5,7 +5,13 @@ read-only ``dc_permissions`` view; everything downstream (encode, lineage,
 indexes, snapshots) sees them through existing machinery. Unprotected
 classes must be bit-identical to the pre-W2 decorator output — the fence
 exists only where the flag is set.
+
+The injected ``_dc_*`` columns and the ``dc_permissions`` property are
+runtime-injected and invisible to pyright on the user's class (the same
+untypeable-by-design doctrine as the magic query syntax) — hence the
+per-file relaxation.
 """
+# pyright: reportAttributeAccessIssue=false
 
 from __future__ import annotations
 
@@ -41,6 +47,9 @@ class SealedEvent:
 
 
 F = dc.fields(Specimen)
+
+# Protected records need a non-anonymous creator since W2-2 (ADR-008 R6).
+CURATOR_ANNA = dc.Principal(uid=2, memberships={7: dc.CURATOR})
 
 
 # --- shape ------------------------------------------------------------------
@@ -79,18 +88,21 @@ def test_birth_values_are_r6_inert():
 
 def test_columns_roundtrip_through_commit_and_reopen(store_factory):
     s1 = store_factory()
-    spec = Specimen(label="fluorite-03", mass_g=3.3)
-    s1.store(spec)
-    spec._dc_read_floor = dc.AGENT
-    spec._dc_write_floor = dc.CURATOR
-    spec._dc_groups.append(42)
-    s1.commit()
+    with s1.acting_as(CURATOR_ANNA):
+        spec = Specimen(label="fluorite-03", mass_g=3.3)
+        s1.store(spec)
+        spec._dc_read_floor = dc.AGENT
+        spec._dc_write_floor = dc.CURATOR
+        spec._dc_groups.append(42)
+        s1.commit()
+    assert spec._dc_owner == 2          # stamped at store() time (W2-2)
     s1.close()
 
     s2 = store_factory()
     back = s2.get(Specimen, label="fluorite-03")
     assert back is not None
     assert back.mass_g == 3.3
+    assert back._dc_owner == 2
     assert back._dc_read_floor == dc.AGENT
     assert back._dc_write_floor == dc.CURATOR
     assert list(back._dc_groups) == [42]
@@ -99,11 +111,12 @@ def test_columns_roundtrip_through_commit_and_reopen(store_factory):
 
 def test_read_floor_range_plans_as_sorted_index_no_residual(store_factory):
     s = store_factory()
-    for i, floor in enumerate((dc.VIEWER, dc.AGENT, dc.CURATOR)):
-        spec = Specimen(label=f"S{i}")
-        s.store(spec)
-        spec._dc_read_floor = floor
-    s.commit()
+    with s.acting_as(CURATOR_ANNA):
+        for i, floor in enumerate((dc.VIEWER, dc.AGENT, dc.CURATOR)):
+            spec = Specimen(label=f"S{i}")
+            s.store(spec)
+            spec._dc_read_floor = floor
+        s.commit()
 
     plan = s.explain(F._dc_read_floor <= dc.AGENT)
     assert plan.indexed                # ADR-004 rule 3 — W3's composition precondition
@@ -177,9 +190,10 @@ def test_container_backref_overload_coexists(store_factory):
     # ENTITY backref — an unrelated concept that must keep working on the
     # injected groups list itself.
     s = store_factory()
-    spec = Specimen(label="galena-07")
-    s.store(spec)
-    s.commit()
+    with s.acting_as(CURATOR_ANNA):
+        spec = Specimen(label="galena-07")
+        s.store(spec)
+        s.commit()
     assert state_of(spec) == STATE_CLEAN
     groups = spec._dc_groups
     assert isinstance(groups, PersistentList)
@@ -211,15 +225,17 @@ def test_unprotected_class_shape_is_untouched():
 
 def test_frozen_protected_constructs_commits_and_reads(store_factory):
     s = store_factory()
-    ev = SealedEvent(seq=1, note="acquired", tags=["field-trip"])
-    s.store(ev)
-    s.commit()
+    with s.acting_as(CURATOR_ANNA):
+        ev = SealedEvent(seq=1, note="acquired", tags=["field-trip"])
+        s.store(ev)
+        s.commit()
     s.close()
 
     s2 = store_factory()
     back = s2.get(SealedEvent, seq=1)
     assert back is not None
     assert back.dc_permissions.write_floor == dc.VIEWER
+    assert back.dc_permissions.owner == 2   # frozen-safe stamping (object.__setattr__)
     with pytest.raises(FrozenEntityError):
         back.note = "edited"
     with pytest.raises(FrozenEntityError):

@@ -16,6 +16,7 @@ ADR-008 batch-1 R3).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 PUBLIC = 0
 """The world group id: every principal implicitly holds ``{PUBLIC: VIEWER}``."""
@@ -39,6 +40,24 @@ EXECUTIVE = 600
 # an unrelated `_dc_owner` slot (the owning-entity backref, _containers.py);
 # the decorator guard keeps user fields out of the namespace either way.
 PERM_FIELDS = ("_dc_owner", "_dc_groups", "_dc_read_floor", "_dc_write_floor")
+
+
+# The R7 LEGACY fill (ADR-008): what a record persisted BEFORE its class
+# turned protected decodes as — read-as-before (every principal implicitly
+# holds {PUBLIC: VIEWER}), writes fenced at the top (ADMIN held in PUBLIC =
+# a store-wide administrator) until someone relabels. DELIBERATELY different
+# from the R6 birth defaults on the injected columns (owner=0/∅/VIEWER/VIEWER):
+# birth labels are stamped at store() time, so the dataclass defaults never
+# reach disk — this fill fires only for pre-protection records, detected by
+# the persisted field list lacking the _dc_* names. ONE constant, three
+# consumers (live hydration plan, snapshot decode, index build) — agreement
+# by construction; the W2-5 gate's prior-label decode reuses it too.
+PERM_LEGACY_FILLS: dict[str, "Callable[[], Any]"] = {
+    "_dc_owner": lambda: 0,          # nobody — and uid 0 never matches (R7a)
+    "_dc_groups": lambda: [PUBLIC],
+    "_dc_read_floor": lambda: VIEWER,
+    "_dc_write_floor": lambda: ADMIN,
+}
 
 
 @dataclass(frozen=True, slots=True)

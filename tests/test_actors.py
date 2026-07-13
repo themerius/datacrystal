@@ -1,8 +1,8 @@
 """dc.Principal, dc.Actor, and the ladder constants (epic #168, W1 — #171).
 
-W1 ships identity as pure data + the shipped registry entity: no enforcement
-exists yet (floors/checks are W2+). These tests pin the surface the
-COMMIT-DELTA-v2 stamps depend on.
+W1 shipped identity as pure data; W2 (ADR-008) flips Actor to protected, so
+registering actors now needs a non-anonymous session — the config-trusted
+bootstrap principal below is the documented recipe ("authenticate outside").
 """
 
 import dataclasses
@@ -10,6 +10,10 @@ import dataclasses
 import pytest
 
 import datacrystal as dc
+
+# The bootstrap identity: whoever opens the store registers the first actors
+# (ADR-008 R6 — the anonymous principal cannot create protected records).
+BOOT = dc.Principal(uid=1)
 
 
 class TestLadder:
@@ -52,15 +56,16 @@ class TestPrincipal:
 class TestActorRegistry:
     def test_actor_rows_roundtrip(self, store_factory):
         store = store_factory()
-        store.store(
-            dc.Actor(uid=2, subject="oidc|anna", display="Anna", human=True,
-                     memberships={1: dc.STAFF, 2: dc.CURATOR})
-        )
-        store.store(
-            dc.Actor(uid=900, display="parser swarm", human=False, sponsor=2,
-                     memberships={2: dc.AGENT})
-        )
-        store.commit()
+        with store.acting_as(BOOT):
+            store.store(
+                dc.Actor(uid=2, subject="oidc|anna", display="Anna", human=True,
+                         memberships={1: dc.STAFF, 2: dc.CURATOR})
+            )
+            store.store(
+                dc.Actor(uid=900, display="parser swarm", human=False, sponsor=2,
+                         memberships={2: dc.AGENT})
+            )
+            store.commit()
         store.close()
 
         reopened = store_factory()
@@ -73,19 +78,22 @@ class TestActorRegistry:
 
     def test_uid_is_unique(self, store_factory):
         store = store_factory()
-        store.store(dc.Actor(uid=2, display="Anna", human=True))
-        store.store(dc.Actor(uid=2, display="impostor", human=True))
-        with pytest.raises(dc.UniqueViolationError):
-            store.commit()
+        with store.acting_as(BOOT):
+            store.store(dc.Actor(uid=2, display="Anna", human=True))
+            store.store(dc.Actor(uid=2, display="impostor", human=True))
+            with pytest.raises(dc.UniqueViolationError):
+                store.commit()
         store.close()
 
     def test_membership_change_is_a_normal_commit(self, store_factory):
         store = store_factory()
-        store.store(dc.Actor(uid=2, display="Anna", human=True, memberships={1: dc.STAFF}))
-        store.commit()
-        anna = store.get(dc.Actor, uid=2)
-        anna.memberships[2] = dc.CURATOR  # in-place container mutation marks dirty
-        store.commit()
+        with store.acting_as(BOOT):
+            store.store(dc.Actor(uid=2, display="Anna", human=True,
+                                 memberships={1: dc.STAFF}))
+            store.commit()
+            anna = store.get(dc.Actor, uid=2)
+            anna.memberships[2] = dc.CURATOR  # in-place container mutation marks dirty
+            store.commit()
         store.close()
 
         reopened = store_factory()
@@ -100,8 +108,9 @@ class TestActorRegistry:
         class Actor:  # the user's domain Actor, unrelated to dc.Actor
             name: str = ""
 
-        store.store(dc.Actor(uid=5, display="registry row", human=True))
-        store.store(Actor(name="stage play lead"))
-        store.commit()
+        with store.acting_as(BOOT):
+            store.store(dc.Actor(uid=5, display="registry row", human=True))
+            store.store(Actor(name="stage play lead"))
+            store.commit()
         assert store.get(dc.Actor, uid=5).display == "registry row"
         assert store.count(Actor) == 1

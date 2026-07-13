@@ -112,7 +112,7 @@ def scene_catalog_events(store: dc.Store, azurite: Specimen) -> None:
     azurite.event_oids.append(store.store(event))  # tracked in-place append
     store.commit()
     try:
-        event.note = "rewrite history"
+        event.note = "rewrite history"  # pyright: ignore[reportAttributeAccessIssue]  # the demo PROVES the frozen raise
     except dc.FrozenEntityError:
         print("frozen event: mutation refused (append-only provenance)")
 

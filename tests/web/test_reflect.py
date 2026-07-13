@@ -205,8 +205,9 @@ def test_from_pydantic_roundtrips_a_protected_create_face(store_factory) -> None
     # never have touched the injected columns (they are not model fields)
     assert rec.name == "Meyer Solartechnik GmbH"
     assert rec._dc_owner == 0 and list(rec._dc_groups) == []
-    s.store(rec)
-    s.commit()
+    with s.acting_as(dc.Principal(uid=7)):     # protected creation needs identity (R6)
+        s.store(rec)
+        s.commit()
     assert s.get(CuratedContact, name="Meyer Solartechnik GmbH") is not None
     s.close()
 
