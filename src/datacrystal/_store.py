@@ -95,6 +95,7 @@ from datacrystal._permissions import (
     NO_STANDING,
     PERM_FIELDS,
     PERM_LEGACY_FILLS,
+    VIEWER,
     authority_towards,
     is_root,
     level,
@@ -239,6 +240,14 @@ class Store:
         self._registry = ObjectRegistry()
         self._new: dict[int, Any] = {}
         self._dirty: dict[int, Any] = {}
+        # Birth/inherited labels of fresh protected records (ADR-008 W2): the
+        # gate's baseline for a NEW record — inheritance and birth defaults are
+        # the LIBRARY's policy, never the principal's grant, so only explicit
+        # verb changes ON TOP of this are ceiling-checked. Keyed by oid,
+        # populated in _stamp_perm_labels, consumed by _check_write_gate,
+        # cleared when the buffer clears (survives a denied commit so a
+        # fixed-up retry still has it).
+        self._birth_labels: dict[int, tuple[int, list[int], int, int]] = {}
         # delete() buffer (ADR-003): oid → (TypeInfo, live instance or None).
         # The strong reference keeps the doomed instance alive until P3 so a
         # pre-commit read cannot rehydrate a mutable CLEAN twin beside it.
@@ -402,6 +411,7 @@ class Store:
         self._root_holder = None
         self._new.clear()
         self._dirty.clear()
+        self._birth_labels.clear()
         self._deleted.clear()
         self._pending_upserts.clear()
         self._fingerprints.clear()
@@ -1480,6 +1490,7 @@ class Store:
         self._new.clear()
         self._dirty.clear()
         self._deleted.clear()
+        self._birth_labels.clear()  # baselines consumed; a retry re-stamps
         return _Capture(tid, batch, index_entries, ref_entries, flipped, delta,
                         deletes, blob_swaps)
 
@@ -1552,11 +1563,16 @@ class Store:
                 # NEW record: no floor to clear. The anonymous case is
                 # normally refused at the stamp site (W2-2); this closes the
                 # remaining paths (e.g. debug-mode rescue of an unstamped
-                # instance) identically.
+                # instance) identically. The gate baseline is the record's
+                # birth/inherited labels — NOT empty: inheritance is the
+                # library's policy (the container was already shared by
+                # someone with standing), so the acting principal is only
+                # answerable for what it staged ON TOP of it.
                 if p.uid == 0:
                     deny(f"cannot create a protected {ti.cls.__name__} as the "
                          "anonymous principal (a record nobody owns must not "
                          "exist, R6/R7a)")
+                base = self._birth_labels.get(oid, (obj._dc_owner, [], VIEWER, VIEWER))
             else:
                 held = authority_towards(p, prior[0], prior[1])
                 if held < prior[3]:
@@ -1565,19 +1581,20 @@ class Store:
                          f"authority towards it is {held} (the floor binds "
                          "everyone, including the owner — the curation "
                          "guarantee)")
+                base = prior
             staged_groups = list(obj._dc_groups)
             ceiling = authority_towards(p, obj._dc_owner, staged_groups)
-            prior_groups: set[int] = set(prior[1]) if prior is not None else set()
-            for g in set(staged_groups) - prior_groups:
+            base_groups: set[int] = set(base[1])
+            for g in set(staged_groups) - base_groups:
                 if level(p, g) == NO_STANDING:
                     deny(f"cannot share {ti.cls.__name__} oid={oid} into group "
                          f"{g}: you hold no standing there (R8 — cross-group "
                          "handoff goes through someone who holds both groups)")
             for label_name, staged, was in (
-                ("read", obj._dc_read_floor, prior[2] if prior else None),
-                ("write", obj._dc_write_floor, prior[3] if prior else None),
+                ("read", obj._dc_read_floor, base[2]),
+                ("write", obj._dc_write_floor, base[3]),
             ):
-                if (prior is None or staged != was) and staged > ceiling:
+                if staged != was and staged > ceiling:
                     deny(f"cannot set {ti.cls.__name__} oid={oid} {label_name} "
                          f"floor to {staged}: your own authority towards the "
                          f"record is {ceiling} (R8 ceiling — a label write is "
@@ -2740,17 +2757,31 @@ class Store:
         is deliberate: frozen-safe (mirrors ``_fill_entity``), and the entity
         is already buffered in ``self._new`` — no dirty-hook work needed.
         """
-        object.__setattr__(obj, "_dc_owner", self.principal.uid)
+        uid = self.principal.uid
+        object.__setattr__(obj, "_dc_owner", uid)
+        # The gate baseline is what inheritance/birth GIVES — independent of any
+        # labels the user staged with verbs before store() (those ARE the
+        # principal's grant and must be ceiling-checked against this baseline).
         if (container is not None
                 and not obj._dc_groups
                 and obj._dc_read_floor == obj._dc_write_floor == 0):  # VIEWER
-            # Inherit ONLY onto the untouched birth shape: labels the user
-            # staged explicitly (dc.share/protect before store()) win over
-            # the container's — inheritance is a default, not an override.
-            groups = wrap_value(list(container._dc_groups), obj)
-            object.__setattr__(obj, "_dc_groups", groups)
-            object.__setattr__(obj, "_dc_read_floor", container._dc_read_floor)
-            object.__setattr__(obj, "_dc_write_floor", container._dc_write_floor)
+            # Inherit ONLY onto the untouched birth shape: NON-DEFAULT labels
+            # staged before store() (dc.share/protect) win over the
+            # container's — inheritance is a default, not an override. (A
+            # child left at the birth defaults is indistinguishable from
+            # untouched, so it inherits; relabel after store() to force
+            # owner-only inside a shared container — documented.)
+            base_groups = list(container._dc_groups)
+            base_read = container._dc_read_floor
+            base_write = container._dc_write_floor
+            object.__setattr__(obj, "_dc_groups", wrap_value(list(base_groups), obj))
+            object.__setattr__(obj, "_dc_read_floor", base_read)
+            object.__setattr__(obj, "_dc_write_floor", base_write)
+        else:
+            base_groups, base_read, base_write = [], VIEWER, VIEWER
+        oid = oid_of(obj)
+        assert oid is not None  # _stamp_perm_labels runs only after stamping
+        self._birth_labels[oid] = (uid, base_groups, base_read, base_write)
 
     def _discover_new_graphs(self) -> None:
         """P1 discovery: dirty/new objects may reference brand-new entities."""
