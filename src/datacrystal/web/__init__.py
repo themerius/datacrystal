@@ -47,6 +47,9 @@ if TYPE_CHECKING:
         create_app as create_app,
     )
     from datacrystal.web._app import (
+        get_principal as get_principal,
+    )
+    from datacrystal.web._app import (
         get_store as get_store,
     )
     from datacrystal.web._app import (
@@ -89,6 +92,7 @@ _LAZY: dict[str, str] = {
     # _app: FastAPI app wiring (#92) — needs fastapi
     "SNAPSHOT_CONTEXT_KEY": "_app",
     "create_app": "_app",
+    "get_principal": "_app",
     "get_store": "_app",
     "graphql_context_getter": "_app",
     "read_snapshot": "_app",
@@ -139,6 +143,7 @@ __all__ = [
     # _app (#92): FastAPI lifespan + per-request read/write/context deps
     "SNAPSHOT_CONTEXT_KEY",
     "create_app",
+    "get_principal",
     "get_store",
     "graphql_context_getter",
     "read_snapshot",

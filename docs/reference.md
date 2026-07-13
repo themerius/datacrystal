@@ -906,7 +906,16 @@ from datacrystal.web import (
 - **`submit_write`** — a dependency yielding an awaitable that ships a closure to the owner
   thread (via `store.submit()`); the mutation **and** commit run on the owner and `await write(fn)`
   resolves only once durable. Return plain data from the closure — a live entity raises
-  `EntityEscapeError`.
+  `EntityEscapeError`. Each shipped closure runs under the **request principal** (below) — the
+  `acting_as` wrap sits inside the closure body, so identities never leak between queued writes.
+- **`get_principal`** — the per-request identity seam (ADR-008). Default `None` → the write runs
+  and stamps as **anonymous** (`actor=0`), never the operator's store-opening identity. Override
+  it FastAPI-style with a resolver that builds a `dc.Principal` from your auth
+  (`app.dependency_overrides[get_principal] = resolve`); return a Principal object, never a bare
+  uid. A `WriteDeniedError` raised by the commit gate surfaces to the client as **403** with a
+  `{"error": "write-denied"}` detail. Federation `/v1/submit` keeps stamping anonymous and
+  **refuses ops on `protected=True` classes pre-flight with 403** (ADR-008 R16 interim — until
+  per-follower principals land).
 - **`get_store`** — exposes the one process store directly (raises if the app was not built with
   the lifespan).
 - **`graphql_context_getter`** — the Strawberry `context_getter`: per request it pins one snapshot

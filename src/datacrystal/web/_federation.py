@@ -43,6 +43,7 @@ from datacrystal._errors import (
     ConflictError,
     DanglingRefError,
     SchemaSkewError,
+    WriteDeniedError,
 )
 from datacrystal.contract.applier import CONTRACT_VERSION, FORMAT_MARKER, encode_delta
 from datacrystal.web._pydantic import entity_model, from_pydantic
@@ -189,6 +190,20 @@ def federation_router(
             info = TYPES_BY_NAME.get(op_type)
             if info is None:
                 raise HTTPException(422, detail=f"unknown type {op_type!r}")
+            if info.protected:
+                # ADR-008 R16 interim: contributions run anonymous, and the
+                # anonymous principal can neither create protected records
+                # (R6) nor clear any floor — so the coordinator refuses
+                # protected-class batches pre-flight, fail closed, before
+                # the owner thread is touched (all-or-nothing is trivial:
+                # nothing was buffered). Per-follower principals are the
+                # deferred follow-up that lifts this.
+                raise HTTPException(403, detail={
+                    "error": "write-denied", "type": op_type,
+                    "message": f"{op_type} is protected=True — federation "
+                               "contributions commit as anonymous until "
+                               "per-follower principals land (ADR-008 R16)",
+                })
             spec = info.spec(op_key)
             if spec is None or not spec.unique:  # #154: the natural key must be Unique
                 raise HTTPException(
@@ -282,6 +297,12 @@ def federation_router(
         except DanglingRefError as exc:
             raise HTTPException(
                 409, detail={"error": ERROR_DANGLING_REF, "message": str(exc)}
+            )
+        except WriteDeniedError as exc:
+            # Backstop for any denial that slips past the pre-flight (e.g. a
+            # future op shape): a clean 403, never an uncaught 500 trace.
+            raise HTTPException(
+                403, detail={"error": "write-denied", "message": str(exc)}
             )
 
     # add_api_route (not the @router.get decorator) so the handlers are
