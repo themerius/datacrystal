@@ -85,6 +85,16 @@ W2-9).
 
 ## Rulings — batch 2 (2026-07-13)
 
+*Amendment 2026-07-13 (W2 build, dated derivation — never a silent
+divergence): R6's derived anonymous-refusal fires at the STAMP SITE
+(`Store._register_graph`), not gate-only as first drafted — a doomed
+owner=0 record must never enter the buffer, because `commit()`'s
+fix-and-retry contract cannot re-stamp it (only `discard()` could).
+P1-discovered children still refuse pre-TID through the same code path,
+so "at the gate in spirit" holds for exactly the entities that never pass
+`store()`. The gate keeps a belt-and-braces anonymous check for exotic
+paths (debug-mode rescue).*
+
 ### R6 · Birth labels: owner-only, explicit shares
 
 **Ruled:** a freshly stored protected record gets `owner = acting principal's
