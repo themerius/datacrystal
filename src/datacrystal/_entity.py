@@ -392,10 +392,10 @@ def _inject_perm_columns(cls: type, annotations: dict[str, Any]) -> None:
 
 
 def _permissions_view(self: Any) -> Permissions:
-    """The injected read-only ``dc_permissions`` property (protected classes
-    only): the four columns packaged as one frozen :class:`Permissions`.
-    ``groups`` copies to a tuple — the live owner-bound list never leaks
-    through the view.
+    """The injected ``dc_permissions`` getter (protected classes only): the
+    four columns packaged as one frozen :class:`Permissions`. ``groups``
+    copies to a tuple — the live owner-bound list never leaks through the
+    view.
     """
     return Permissions(
         owner=self._dc_owner,
@@ -403,6 +403,32 @@ def _permissions_view(self: Any) -> Permissions:
         read_floor=self._dc_read_floor,
         write_floor=self._dc_write_floor,
     )
+
+
+def _permissions_assign(self: Any, value: Any) -> None:
+    """The injected ``dc_permissions`` setter — write-time inheritance:
+    ``child.dc_permissions = parent.dc_permissions`` copies ALL FOUR columns
+    verbatim, owner included (the study: "the property packages the columns
+    on read and writes them back on assignment"). The gate rules on legality
+    of the staged result at commit (W2-5), never here. Groups copy into a
+    FRESH list — no aliasing between records. Validation runs before the
+    first column write so a raise never leaves half a struct staged (the
+    dirty flip the failed outer setattr already caused is the pre-existing
+    invalid-slot-assignment wart, accepted).
+
+    Reached via the data-descriptor protocol: user assignment goes through
+    ``_tracked_setattr`` (touch + frozen guard) and ``object.__setattr__``
+    then invokes this setter.
+    """
+    if not isinstance(value, Permissions):
+        raise TypeError(
+            f"dc_permissions must be assigned a dc.Permissions, got "
+            f"{type(value).__name__}"
+        )
+    setattr(self, "_dc_owner", value.owner)
+    setattr(self, "_dc_groups", list(value.groups))  # wraps owner-bound (copy)
+    setattr(self, "_dc_read_floor", value.read_floor)
+    setattr(self, "_dc_write_floor", value.write_floor)
 
 
 _TEntity = TypeVar("_TEntity")
@@ -478,7 +504,7 @@ def _make_entity(cls: type, frozen: bool, protected: bool = False) -> type:
         "__setattr__": _frozen_setattr if frozen else _tracked_setattr,
     }
     if protected:
-        namespace["dc_permissions"] = property(_permissions_view)
+        namespace["dc_permissions"] = property(_permissions_view, _permissions_assign)
     final = EntityMeta(cls.__name__, (base,), namespace)
 
     info = TypeInfo(final, typename, field_names, frozen, protected)

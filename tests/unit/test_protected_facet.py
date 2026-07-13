@@ -148,13 +148,11 @@ def test_dc_permissions_groups_is_a_point_in_time_copy():
     assert isinstance(spec.dc_permissions.groups, tuple)
 
 
-def test_dc_permissions_has_no_setter_in_w2_1():
-    # The setter (write-time inheritance) is W2-4's story; until then
-    # assignment raises. NB the pre-existing wart: the failed setattr may
-    # already have flipped a CLEAN record DIRTY — pinned there, not here.
+def test_dc_permissions_rejects_non_permissions_assignment():
+    # The setter (W2-4, write-time inheritance) accepts only dc.Permissions.
     spec = Specimen(label="beryl-06")
-    with pytest.raises(AttributeError):
-        spec.dc_permissions = spec.dc_permissions  # pyright: ignore[reportAttributeAccessIssue]
+    with pytest.raises(TypeError, match="dc.Permissions"):
+        spec.dc_permissions = {"owner": 9}
 
 
 # --- the reserved-name guard ---------------------------------------------------

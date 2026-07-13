@@ -2579,7 +2579,12 @@ class Store:
         is already buffered in ``self._new`` — no dirty-hook work needed.
         """
         object.__setattr__(obj, "_dc_owner", self.principal.uid)
-        if container is not None:
+        if (container is not None
+                and not obj._dc_groups
+                and obj._dc_read_floor == obj._dc_write_floor == 0):  # VIEWER
+            # Inherit ONLY onto the untouched birth shape: labels the user
+            # staged explicitly (dc.share/protect before store()) win over
+            # the container's — inheritance is a default, not an override.
             groups = wrap_value(list(container._dc_groups), obj)
             object.__setattr__(obj, "_dc_groups", groups)
             object.__setattr__(obj, "_dc_read_floor", container._dc_read_floor)
