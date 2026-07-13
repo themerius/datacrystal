@@ -142,6 +142,26 @@ class _VersionBlind(CountingConsumer):
         return super().apply({**delta, "v": CONTRACT_VERSION})
 
 
+class _PartialApplierOnVersion(CountingConsumer):
+    """§4.5 violation, the OTHER half of the sentence ("never partially
+    applied"): folds types+ops into derived state FIRST and validates the
+    version LAST — raises loudly, watermark untouched, residue retained.
+    The natural late-validation bug; the W1 review's PoC, pinned closed."""
+
+    def apply(self, delta: dict[str, Any]) -> bool:
+        if delta["v"] != CONTRACT_VERSION:
+            for cid, typename, _fields in delta["types"]:
+                self._typename_by_cid[cid] = typename
+            for op in delta["ops"]:
+                if op["op"] == "upsert":
+                    typename = self._typename_by_cid.get(op["cid"], "?")
+                    if op["oid"] not in self._typename_by_oid:
+                        self.counts[typename] = self.counts.get(typename, 0) + 1
+                    self._typename_by_oid[op["oid"]] = typename
+            raise DeltaFormatError("unsupported contract version (too late)")
+        return super().apply(delta)
+
+
 class _OpGuesser(CountingConsumer):
     """§3 violation: guesses that an unknown op is probably an upsert."""
 
@@ -176,6 +196,7 @@ class _DeleteIgnorer(_TermIndex):
         (_GapBlind, "§4.4"),
         (_Reapplier, "§4.2"),
         (_VersionBlind, "§4.5"),
+        (_PartialApplierOnVersion, "§4.5"),
         (_OpGuesser, "§3 unknown op"),
         (_DeleteIgnorer, "§3.1"),
     ],

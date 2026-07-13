@@ -12,10 +12,13 @@ advanced to [COMMIT-DELTA-v2](COMMIT-DELTA-v2.md).** Nothing in THIS contract ch
 layout, endpoints and envelopes are untouched; the wire always self-described the carried
 version (`/v1/head` serves the shared `CONTRACT_VERSION` constant, now `2`; every framed delta
 carries `v`). Where this document's tables say `1`, read the constant. Per the no-compat ruling
-there is no mixed-version fleet story: a pre-v2 follower REFUSES v2 frames loudly — on bootstrap
-(the reference applier) *and* on catch-up (`_apply_catchup`'s version guard, added in W1;
-before that the sync path applied any version silently) — and is re-bootstrapped from a v2
-coordinator. Upgrade both sides together; the versions never coexist.
+there is no mixed-version fleet story. Honest asymmetry: a **v2 build** refuses mismatched
+frames loudly on bootstrap *and* on catch-up (`_apply_catchup`'s version guard, added in W1);
+a **pre-v2 build** refuses only on bootstrap (its v1 reference applier raises on `v > 1`) —
+its catch-up path had NO version check and applies v2 frames **silently**, which is exactly
+the drift this ruling forbids. So the rule is operational: stop or upgrade every pre-v2
+follower BEFORE the coordinator starts emitting v2; never leave an old replica syncing.
+Upgrade both sides together; the versions never coexist.
 
 The wire reuses two byte formats that already exist and are LOCKED — this
 contract adds **no new record/delta encoding**, only an HTTP envelope:

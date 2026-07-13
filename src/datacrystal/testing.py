@@ -177,9 +177,13 @@ def check_delta_consumer(
 
     # -- §4.5: version exactness — refusal in BOTH directions -------------------
     # (COMMIT-DELTA-v2 §4.5 under the no-compat ruling: a v2 consumer accepts
-    # exactly v == 2; older streams are recreated, never migrated.)
+    # exactly v == 2; older streams are recreated, never migrated. "Never
+    # partially applied": the refusal must land BEFORE any state is folded,
+    # so derived state is probed like §4.4 does — a late-validating consumer
+    # that folds ops first and checks the version last must fail here.)
     ran.append("§4.5 version refusal")
     consumer = factory()
+    before = content(consumer) if content is not None else None
     newer = _stream_create_update_delete()[0]
     newer["v"] = CONTRACT_VERSION + 1
     version_refused = False
@@ -191,6 +195,11 @@ def check_delta_consumer(
             "a delta with a newer contract version MUST raise")
     section("§4.5 version refusal", consumer.watermark == 0,
             "the refused newer-version delta moved the watermark")
+    if content is not None:
+        section("§4.5 version refusal", content(consumer) == before,
+                "the refused newer-version delta changed the derived state — "
+                "reject the version before folding anything (never partially "
+                "applied, COMMIT-DELTA-v2 §4.5)")
     older = _stream_create_update_delete()[0]
     older["v"] = CONTRACT_VERSION - 1
     older_refused = False
@@ -203,6 +212,11 @@ def check_delta_consumer(
             "streams are recreated, never migrated (COMMIT-DELTA-v2 §7)")
     section("§4.5 version refusal", consumer.watermark == 0,
             "the refused older-version delta moved the watermark")
+    if content is not None:
+        section("§4.5 version refusal", content(consumer) == before,
+                "the refused older-version delta changed the derived state — "
+                "reject the version before folding anything (never partially "
+                "applied, COMMIT-DELTA-v2 §4.5)")
 
     # -- §3: unknown ops are refused, never guessed ----------------------------
     ran.append("§3 unknown op")
