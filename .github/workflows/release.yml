@@ -51,44 +51,15 @@ jobs:
       - name: Sync environment (Python pinned via .python-version; extras for their tests)
         run: uv sync --all-extras
 
-      - name: Compute next version and write pyproject.toml
+      - name: Compute next version and rewrite every mirror (#176 — one source)
         id: bump
         env:
           BUMP: ${{ inputs.bump }}
-        run: |
-          python3 - "$BUMP" <<'PY'
-          import os, re, sys, pathlib
-          bump = sys.argv[1]
-          p = pathlib.Path("pyproject.toml")
-          text = p.read_text()
-          m = re.search(r'^version = "([^"]+)"', text, re.M)
-          if not m:
-              sys.exit("could not find version in pyproject.toml")
-          cur = m.group(1)
-          base = re.match(r"(\d+)\.(\d+)\.(\d+)", cur)  # ignore any .devN / pre suffix
-          if not base:
-              sys.exit(f"version {cur!r} is not X.Y.Z")
-          major, minor, patch = (int(base.group(i)) for i in (1, 2, 3))
-          if bump == "major":
-              major, minor, patch = major + 1, 0, 0
-          elif bump == "minor":
-              minor, patch = minor + 1, 0
-          else:
-              patch += 1
-          new = f"{major}.{minor}.{patch}"
-          p.write_text(text[:m.start(1)] + new + text[m.end(1):])
-          # Keep the in-code __version__ mirror in lockstep — drift bit us at v0.1.0.
-          init = pathlib.Path("src/datacrystal/__init__.py")
-          inew, n = re.subn(r'(^__version__ = ")[^"]+(")',
-                            lambda mm: mm.group(1) + new + mm.group(2),
-                            init.read_text(), flags=re.M)
-          if n != 1:
-              sys.exit(f"expected exactly one __version__ in __init__.py, found {n}")
-          init.write_text(inew)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"version={new}\n")
-          print(f"{cur} -> {new}  ({bump})")
-          PY
+        # scripts/bump_version.py rewrites pyproject, __version__, the README
+        # badge/pins/status, and the CLAUDE.md header version in lockstep;
+        # tests/fitness/test_version_sync.py (run in the gate below) fails
+        # the release if any mirror disagrees.
+        run: python3 scripts/bump_version.py "$BUMP"
 
       - name: Re-lock so uv.lock carries the new version
         run: uv lock
@@ -140,7 +111,7 @@ jobs:
           v="${{ steps.bump.outputs.version }}"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -q pyproject.toml src/datacrystal/__init__.py uv.lock -m "release: datacrystal v$v"
+          git commit -q pyproject.toml src/datacrystal/__init__.py uv.lock README.md CLAUDE.md -m "release: datacrystal v$v"
           git tag -a "v$v" -m "datacrystal v$v"
           git push origin HEAD:main
           git push origin "v$v"
