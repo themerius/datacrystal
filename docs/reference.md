@@ -755,10 +755,26 @@ class Contact:
   `dc.Actor` registry is itself protected under exactly this rule.
 - `upsert()` **never merges label columns** — an ETL probe instance's birth defaults
   cannot reset a survivor's curated labels (`/v1/submit` rides upsert).
-- Honesty note: in this release the columns are **carried and stamped, not yet
-  fenced on write or read** — the commit write gate and the read floors are
-  `[planned — Permissions W2–W4]`; the sharing verbs (`share`/`unshare`/`protect`)
-  are `[planned — W2-4]`.
+- **The label verbs** stage changes through normal dirty-tracking and commit with
+  everything else — they check no authority themselves (stage-now-reject-at-commit is
+  what makes the maker–checker flow work; the commit gate rules against the
+  *committing* principal):
+
+  ```python
+  dc.share(c, TEAM_PV, read=dc.VIEWER, write=dc.AGENT)   # explicit levels REQUIRED
+  dc.protect(c, write=dc.CURATOR)     # floors only, never groups
+  dc.unshare(c, TEAM_PV)              # group only, floors untouched; absent = no-op
+  child.dc_permissions = parent.dc_permissions   # write-time inheritance (all four)
+  ```
+
+  Floors are per-record, not per-group. Verbs on a `frozen=True` record raise
+  `FrozenEntityError` — a frozen record's labels are fixed at registration
+  (container inheritance or birth defaults), MLS tranquility taken literally.
+  Labels staged with verbs *before* `store()` win over container inheritance
+  (inheritance fills only the untouched birth shape).
+- Honesty note: in this release the columns are **carried, stamped and stageable,
+  not yet fenced on write or read** — the commit write gate and the read floors are
+  `[planned — Permissions W2–W4]`.
 
 ## Snapshots
 
