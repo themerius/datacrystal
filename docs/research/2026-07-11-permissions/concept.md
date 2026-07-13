@@ -292,9 +292,11 @@ phase-0 pilot should put numbers next to this sentence.)
 
 ### Audit: COMMIT-DELTA v2 and the DeltaLog
 
-The delta map gains two optional top-level keys — `actor` (int uid) and
+The delta map gains two top-level keys — `actor` (int uid) and
 `at` (msgpack timestamp) — **per delta, never per op** (a commit has one
-actor and one instant). Emitting them under v1's "unknown keys MUST be
+actor and one instant). *(Superseded 2026-07-13: drafted here as optional;
+v2 as LOCKED makes both REQUIRED on every delta — ADR-008 R4 /
+COMMIT-DELTA-v2 §2, "always stamp both".)* Emitting them under v1's "unknown keys MUST be
 ignored" clause would technically work, but it would break the byte-pinned
 golden vectors and make audit fields droppable by contract — an honest
 version bump, affordable at the library's stage; old logs replay
@@ -513,14 +515,26 @@ effective rights = intersection of agent and delegating user).
 
 ## Open decisions
 
+**RESOLVED 2026-07-13** — every decision below (and the batch-2 set that grew
+out of them: legacy fill, break-glass root, eager refs, leak surfaces, FTS
+stance, error naming) is ruled in
+[ADR-008](../../design/ADR-008-permissions-contract.md), the normative record
+from here on. Notable divergences from this draft's proposals: the separate
+`get_masked()` method is retired in favor of a zero-churn masked path
+(ADR-008 R14), and FTS post-filters rather than refusing (R13). Kept as
+drafted for history:
+
 - Default floors on protected classes (proposal: fail closed, owner-only,
-  floors VIEWER).
+  floors VIEWER). → ruled as proposed (R6).
 - `count()`/`explain()` post-filter? (Proposal: yes — counts leak.)
+  → ruled as proposed (R12).
 - Exact floor-ceiling rule (proposal: new floor ≤ own authority towards
-  the record).
+  the record). → ruled as proposed, no owner exemption; plus the audited
+  root (R8, R9).
 - Group id registry (ints behind names) — shipped constants helper or app
-  convention.
+  convention. → app convention for now; a constants helper stays additive.
 - Naming of the masked deref (`get_masked()` vs `get(masked=True)`).
+  → neither; see R14.
 
 ## Prior art
 

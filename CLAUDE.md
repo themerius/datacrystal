@@ -2,9 +2,9 @@
 
 datacrystal: an embedded object-graph database for Python (EclipseStore-inspired) — typed live
 objects ARE the database; pickle-free msgpack records, roaring-bitmap queries, SQLite-blob
-durability, and three released-shape extras: `datacrystal[fts]` (FTS5 + Snowball),
-`datacrystal[arrow]` (persistent parquet mirrors), and `datacrystal[web]` (FastAPI/Pydantic +
-Strawberry GraphQL). Solo maintainer: Sven Hodapp. Version
+durability, and four released-shape extras: `datacrystal[fts]` (FTS5 + Snowball),
+`datacrystal[arrow]` (persistent parquet mirrors), `datacrystal[web]` (FastAPI/Pydantic +
+Strawberry GraphQL), and `datacrystal[follower]` (fractal followers). Solo maintainer: Sven Hodapp. Version
 `0.8.0` — v0.1.0 was the **API-freeze baseline (2026-06-13)**; v0.2–0.8 ship a purely
 **additive surface** (the v0.1.0 freeze is never broken): **0.2** = query ergonomics
 (multi-valued list index, `limit`/`offset` + `query_iter`, `RenamedFrom`, streaming
@@ -53,7 +53,7 @@ stale venv shebangs — `rm -rf .venv && uv sync`.
   living engineering standards**: the 20 architectural fitness functions, the perf-gate principles +
   benchmark table, and the canonical mineral-cabinet domain (one domain everywhere) — the **cited
   source of truth for gate thresholds** (enforced in `tests/fitness/` + `benchmarks/`). NOT a
-  backlog; the one open remainder (the nightly lane) is GitHub #27.
+  backlog (the last open remainder, the nightly 1M lane, shipped in v0.7.0).
 - `docs/design/ADR-001-concurrency-contract.md` — accepted owner-confinement contract.
 - `docs/design/ADR-002-storage-read-views.md` — accepted `read_view()` protocol addition
   (snapshot isolation for `store.snapshot()`); storage-protocol growth always needs an ADR.
@@ -78,6 +78,15 @@ stale venv shebangs — `rm -rf .venv && uv sync`.
   (size-known, ~954 MiB ceiling), chunked layout = #76 (single-cell→chunked migration, never both).
   Lazy-whole landed in #88 (#81-83); streamed read/write in #90 (#84/#85). The `BLOB_EXT`/`StreamedBlob`
   byte format is LOCKED — a change means a NEW contract version, never an edit.
+- `docs/design/ADR-008-permissions-contract.md` — **accepted permissions contract** (epic #168,
+  rulings #170): the normative access predicate (write floor binds everyone incl. the owner —
+  the curation guarantee; uid 0 never owns), fail-closed birth labels, legacy fill
+  (read-as-before/ADMIN-write), floor ceiling ≤ own authority, the **audited root**
+  (EXECUTIVE-in-PUBLIC break-glass, no new API surface), protected classes Lazy-referable only,
+  mask-on-deref/filter-on-discovery, FTS post-filter, `WriteDeniedError`/`ReadDeniedError`.
+  Two items ratify at ADR review, gating W3+ only: **R14** (masked traversal, two live
+  variants) and **R15** (snapshot-pool overlay, adopted default). Audit half = COMMIT-DELTA-v2;
+  the "why" = `docs/research/2026-07-11-permissions/concept.md`.
 - `docs/` — user-facing semantics, a **Diátaxis split** (#128): `docs/GUIDE.md` is the thin index
   (README/design docs link to it), `docs/tutorial.md` the first session, `docs/how-to/*.md` the
   goal recipes, `docs/reference.md` the dry complete API (the drift-guard's target), and
@@ -141,6 +150,13 @@ stale venv shebangs — `rm -rf .venv && uv sync`.
 |---|---|
 | `_store.py` | facade: open/root/store/delete/upsert/commit/get/query/explain/count/pluck/get_many/attach/detach/snapshot/open_blob; query/count/pluck/explain all take class-or-Condition (symmetry, 2026-06-12); explain() reports the two-rule QueryPlan — NEVER grow an optimizer (DuckDB over the mirror owns that tier); P1 capture (+ prior reads + delta build when consumers watch) → P2 backend I/O → P3 flip + delta delivery; type lineage + hydration plans; decode-level reads (count/pluck) construct no entities; deletes are unchecked per ADR-003 (DanglingRefError on follow); upsert merges into the surviving instance, writing only changed fields |
 | `_pipeline.py` | COMMIT-DELTA-v2 emission: `DeltaConsumer` protocol + `build_delta` (required `actor`/`at` stamps, keyword-only defaultless); delivery in P3 post-durability; a raising consumer detaches loudly (never holds writes hostage) |
+| `_actors.py` | epic #168 W1 identity surface: `dc.Principal` (frozen, uid + memberships), the shipped `dc.Actor` registry entity, ladder constants (`VIEWER`…`EXECUTIVE`, `PUBLIC`/`NO_STANDING`); `Store.open(principal=)`, `store.principal`, `acting_as()` (ContextVar-backed, task-confined; sponsor gate for non-human actors) live in `_store.py` |
+| `_async.py` | `aopen()`/`AsyncStore`: asyncio facade (ADR-001 owner-loop confinement; "a critical section is the code between awaits"); awaitable three-phase commit (P1 before first await), `transaction()` lock scope |
+| `_follower.py` | v0.8 `datacrystal[follower]` client half: `open_follower`/`Store.follower` over FEDERATION-WIRE-v1; catch-up exact-version guard; OCC via prior-payload digest |
+| `_errors.py` | the `DataCrystalError` taxonomy every module raises from (mirrored in docs/reference.md `## Errors` — DoD) |
+| `_index_cache.py` | ADR-005 watermark-stamped on-disk index cache — never authoritative, rebuilt on any mismatch |
+| `contract/` | engine-free COMMIT-DELTA-v2 reference applier + codec (`CONTRACT_VERSION`, exact-version refusal both directions) + byte-pinned replay vectors in `contract/vectors/`; normative over prose |
+| `web/` | `datacrystal[web]` extra: Pydantic REST boundary (`entity_model`/`to_pydantic`/`from_pydantic`), Strawberry GraphQL over pooled per-watermark snapshots (DataLoader, no-N+1), `federation_router` (fan-in stamps anonymous) |
 | `_snapshot.py` | `store.snapshot()` frozen `EntityView`/`Ref` reads at a commit watermark, callable from any thread (ADR-002 read views); bitmap `query()`/`count()` + `index_bitmaps()` over snapshot-local indexes rebuilt from the pinned view (never shared with the owner's) |
 | `testing.py` | public conformance kit `check_delta_consumer` + `CountingConsumer` (incl. the snapshot-bootstrap recipe for mid-life attach) |
 | `_entity.py` | `@entity` decorator → slots dataclass + engine slots; one-shot `__setattr__` dirty hook; `TypeInfo` (specs, defaults); metaclass turns class-attr access into query `FieldExpr`s |
