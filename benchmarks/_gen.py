@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import random
-from typing import Annotated
+from typing import Annotated, Any
 
 import datacrystal as dc
 
@@ -93,6 +93,21 @@ class Specimen:
     acquired_from: "dc.Lazy[Specimen] | None" = None
 
 
+@dc.entity(protected=True)
+class CuratedSpecimen:
+    """Specimen's protected twin (ADR-008, W2-9): exactly the same five
+    fields, so protected-vs-plain benchmarks compare ONLY the fence cost.
+    Stores built with ``protected=True`` must be opened with a non-anonymous
+    ``principal=`` — the R6 fail-closed refusal rejects anonymous creation.
+    """
+
+    specimen_no: Annotated[str, dc.Unique]
+    mineral: dc.Lazy[Mineral]
+    quality: Annotated[str, dc.Index]
+    mass_g: float
+    acquired_from: "dc.Lazy[CuratedSpecimen] | None" = None
+
+
 @dc.entity(frozen=True)
 class CatalogEvent:
     seq: Annotated[int, dc.Unique]
@@ -115,11 +130,15 @@ def vocabulary(size: int = 200) -> list[tuple[str, str, float]]:
 
 
 def build(store: dc.Store, *, specimens: int, seed: int = 0xDC,
-          batch: int = 10_000) -> dict[str, int]:
+          batch: int = 10_000, protected: bool = False) -> dict[str, int]:
     """Populate ``store`` with the scaled cabinet; returns object counts.
     Commits in batches so P1 capture stays bounded; idempotent only on an
     empty store (it assigns the root)."""
     rng = random.Random(seed)
+    # protected=True swaps ONLY the specimen layer's class (additive knob,
+    # W2-9): same rng sequence, Zipf hubs, chain/cycle topology and events —
+    # the corpus differs solely in the four injected _dc_ columns.
+    specimen_cls = CuratedSpecimen if protected else Specimen
     countries = [Country(iso=name[:2].upper() + str(i), name=name)
                  for i, name in enumerate(_COUNTRIES)]
     localities = [
@@ -158,11 +177,11 @@ def build(store: dc.Store, *, specimens: int, seed: int = 0xDC,
 
     seq = 0
     chain_depth: dict[str, int] = {}
-    recent: list[Specimen] = []   # chain sources (bounded window)
-    cycle_candidates: list[Specimen] = []
+    recent: list[Any] = []   # chain sources (bounded window); Specimen or twin
+    cycle_candidates: list[Any] = []
     all_events = 0
     for start in range(0, specimens, batch):
-        block: list[Specimen] = []
+        block: list[Any] = []
         events: list[CatalogEvent] = []
         for i in range(start, min(start + batch, specimens)):
             no = f"S-{i:07d}"
@@ -175,7 +194,7 @@ def build(store: dc.Store, *, specimens: int, seed: int = 0xDC,
                     acquired_from = dc.Lazy.of(source)
                 else:
                     depth = 0
-            specimen = Specimen(
+            specimen = specimen_cls(
                 specimen_no=no,
                 mineral=dc.Lazy.of(pick_mineral()),
                 quality=_QUALITIES[
