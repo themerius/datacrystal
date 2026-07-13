@@ -242,12 +242,12 @@ class TestRegistryGates:
             store.store(dc.Actor(uid=900, display="bot", human=False))
             store.store(dc.Actor(uid=2, display="Anna", human=True))
             store.commit()
-        row = store.get(dc.Actor, uid=900)
-        row.sponsor = 2  # buffered, NOT committed
-        with pytest.raises(dc.UncommittedActorError):
-            with store.acting_as(900):
-                pass
-        store.commit()  # now durable
+            row = store.get(dc.Actor, uid=900)
+            row.sponsor = 2  # buffered, NOT committed
+            with pytest.raises(dc.UncommittedActorError):
+                with store.acting_as(900):
+                    pass
+            store.commit()  # now durable (BOOT owns the row — clears the gate)
         with store.acting_as(900):
             pass
 

@@ -18,7 +18,10 @@ verb can run, every module is initialized.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 PUBLIC = 0
 """The world group id: every principal implicitly holds ``{PUBLIC: VIEWER}``."""
@@ -212,3 +215,46 @@ def protect(rec: Any, *, read: int | None = None, write: int | None = None) -> N
         rec._dc_read_floor = read
     if write is not None:
         rec._dc_write_floor = write
+
+
+# --- the normative predicates (ADR-008 Context, transcribed verbatim) -----------
+
+
+def level(p: Any, g: int) -> int:
+    """The level ``p`` holds in group ``g`` — with the implicit world
+    membership made normative: every principal holds at least ``VIEWER`` in
+    ``PUBLIC``, even ``Principal(uid=0, memberships={})`` (ADR-008).
+    """
+    return p.memberships.get(g, VIEWER if g == PUBLIC else NO_STANDING)
+
+
+def is_owner(p: Any, owner: int) -> bool:
+    """uid 0 IS the anonymous principal, so 0 can never be an owner:
+    ``_dc_owner == 0`` means *nobody* (R7) and matches no session (R7a) —
+    without this, anonymous would own every legacy record in the store.
+    """
+    return p.uid != 0 and owner == p.uid
+
+
+def authority_towards(p: Any, owner: int, groups: Iterable[int]) -> int:
+    """Highest level ``p`` holds in any group the record is shared with;
+    owners act at their personal-best level on their own records (ADR-008 —
+    what lets the owner of an unshared record write and ratchet it at all).
+    Pure over plain values: the commit gate calls it on decoded prior
+    tuples, the ceiling check on staged values, and W3's readable-set
+    compiler will call it per snapshot row — one predicate, three callers.
+    """
+    levels = [level(p, g) for g in groups]
+    if is_owner(p, owner):
+        levels.append(max(p.memberships.values(), default=VIEWER))
+    return max(levels, default=NO_STANDING)
+
+
+def is_root(p: Any) -> bool:
+    """Break-glass (R9): EXECUTIVE held explicitly in PUBLIC = store root —
+    every permission check passes, incl. on owner-only records; every root
+    action still lands stamped in the delta log (visible, never silent).
+    ``uid != 0`` is the defensive R7a closure: the anonymous principal can
+    never be root, whatever memberships someone hands it.
+    """
+    return p.uid != 0 and p.memberships.get(PUBLIC, VIEWER) >= EXECUTIVE

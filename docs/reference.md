@@ -772,9 +772,26 @@ class Contact:
   (container inheritance or birth defaults), MLS tranquility taken literally.
   Labels staged with verbs *before* `store()` win over container inheritance
   (inheritance fills only the untouched birth shape).
-- Honesty note: in this release the columns are **carried, stamped and stageable,
-  not yet fenced on write or read** — the commit write gate and the read floors are
-  `[planned — Permissions W2–W4]`.
+- **The write fence is live** (ADR-008): every commit checks each buffered
+  protected write — content, label change, or delete — against the record's
+  *current persisted* write floor (**it binds everyone, including the owner** —
+  once a curator ratchets a record, the agent that created it can never
+  overwrite it), and every *changed* floor against your own authority towards
+  the record (the ceiling: at most your level in a shared group, or your
+  personal best on records you own; sharing into a group you hold no standing
+  in is refused). Denial raises `WriteDeniedError` **before the TID** — the
+  sequence stays gapless and the buffer stays intact: `discard()` or fix and
+  re-commit. Denial is deterministic — `committing()` never retries it.
+- **Break-glass**: a principal holding `EXECUTIVE` in the `PUBLIC` group is
+  store **root** — every check passes, including on owner-only records
+  (orphan rescue, offboarding). No new API: root is a property of the
+  principal's memberships, and every root commit is stamped in the delta log —
+  bypass is visible, never silent. `migrate()` rides the gate too (legacy
+  records carry the `ADMIN` floor — run migrations as a store-wide admin or
+  root); `verify()` is read-only and never gated.
+- Honesty note: **read floors are carried but not yet enforced** — reads do
+  not filter by principal in this release; the read fence is
+  `[planned — Permissions W3/W4]`.
 
 ## Snapshots
 
