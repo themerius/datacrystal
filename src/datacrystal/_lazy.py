@@ -103,6 +103,11 @@ class Lazy[T]:
         return self._oid
 
     def get(self) -> T:
+        # local import: _entity imports _lazy at module level, so a module-level
+        # import here would cycle (the _state.py/_permissions.py precedent for
+        # engine-lazy imports).
+        from datacrystal._entity import oid_of, type_info
+
         obj = self._obj
         if obj is None:
             storeref = self._storeref
@@ -116,11 +121,6 @@ class Lazy[T]:
             # or raises DanglingRefError — never _load_oid, which stays
             # principal-free (R11 makes deref the ONE read checkpoint).
             obj = cast(T, store._load_oid_deref(self._oid))
-            # local import: _entity imports _lazy at module level, so a
-            # module-level import here would cycle (the _state.py/
-            # _permissions.py precedent for engine-lazy imports).
-            from datacrystal._entity import type_info
-
             # A protected target is NEVER cached on the engine handle — twins
             # report the real (protected) TypeInfo too, so this exemption
             # covers both "denied" and "readable" protected outcomes alike:
@@ -134,7 +134,30 @@ class Lazy[T]:
                 manager = store._lazyman
                 if manager is not None:
                     manager.track(self)
-        elif self._clock is not None:
+            return obj
+        # A CACHED target still has to honour the checkpoint when it is
+        # protected: a user ``Lazy.of(protected)`` handle keeps ``_obj`` (it
+        # is never demoted, unlike an engine handle), and once its parent is
+        # shared across principals in a live store it would otherwise serve the
+        # real instance to a later acting_as() scope that cannot read it (the
+        # cross-principal leak the Fable read-fence review found — the engine
+        # handle fix above never reaches a user handle). Recover the store + oid
+        # from the target's OWN registration and re-derive through the checked
+        # deref. An UNBOUND target (a fresh Lazy.of whose entity was never
+        # stored) has no store and is reachable only by its single creating
+        # principal, so it returns as-is.
+        if type_info(obj).protected:
+            oid = oid_of(obj)
+            if oid is not None:
+                try:
+                    storeref = object.__getattribute__(obj, "__dc_store__")
+                except AttributeError:
+                    storeref = None
+                store = storeref() if storeref is not None else None
+                if store is not None:
+                    return cast(T, store._load_oid_deref(oid))
+            return obj
+        if self._clock is not None:
             self._atime = self._clock()  # refresh idle time for the manager
         return obj
 

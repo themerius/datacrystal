@@ -330,9 +330,13 @@ class TestUpsertShield:
             probe.prize = dc.Lazy.of(Gem(name="new-prize"))
             survivor = store.upsert(probe)
             store.commit()
-        assert survivor is d
-        assert d.prize is not None and d.prize.get().name == "new-prize"   # data merged
-        assert d._dc_write_floor == dc.STAFF                          # labels kept
+            assert survivor is d
+            # Read the merged protected Gem UNDER its owner: outside ANNA's
+            # scope d.prize.get() correctly returns a Redacted twin (the
+            # cross-principal deref fence, ADR-008 R14) — reading the data
+            # field there would leak. The merge itself is what's under test.
+            assert d.prize is not None and d.prize.get().name == "new-prize"
+        assert d._dc_write_floor == dc.STAFF   # a held real instance: label kept
 
     def test_unchanged_reimport_buffers_nothing(self, store):
         with store.acting_as(ANNA):

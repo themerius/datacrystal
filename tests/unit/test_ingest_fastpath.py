@@ -56,9 +56,9 @@ def _count_walks(store, monkeypatch) -> dict[str, int]:
     calls = {"n": 0}
     real = type(store)._walk_value
 
-    def counting(self, value, queue, container=None):
+    def counting(self, value, queue, container=None, **kwargs):
         calls["n"] += 1
-        return real(self, value, queue, container)
+        return real(self, value, queue, container, **kwargs)
 
     monkeypatch.setattr(type(store), "_walk_value", counting)
     return calls

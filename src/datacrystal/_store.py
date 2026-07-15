@@ -2773,9 +2773,14 @@ class Store:
                 # ref-bearing field is never wrongly skipped.
                 if ti.has_entity_refs:
                     child_container = current if ti.protected else None
-                    for name in ti.field_names:
-                        self._walk_value(getattr(current, name), queue,
-                                         child_container)
+                    for spec in ti.specs:
+                        # eager_position drives the R11 runtime check: a field
+                        # whose refs do NOT decode as Lazy handles would
+                        # eager-materialize a protected child (ADR-008 R11 leak
+                        # backstop — see _walk_value).
+                        self._walk_value(getattr(current, spec.name), queue,
+                                         child_container,
+                                         eager_position=not spec.lazy_refs)
         return oid_of(obj)  # type: ignore[return-value]
 
     def _stamp_perm_labels(self, obj: Any, container: Any) -> None:
@@ -2825,32 +2830,38 @@ class Store:
             self._register_graph(obj, walked)
 
     def _walk_value(self, value: Any, queue: deque[tuple[Any, Any]],
-                    container: Any = None, *, via_lazy: bool = False) -> None:
+                    container: Any = None, *, eager_position: bool = False) -> None:
         if value is None or isinstance(value, (str, float, int, bytes)):
             return  # overwhelmingly the common case: scalars reference nothing
         if is_entity(value):
-            if (not via_lazy and type_info(value).protected
+            if (eager_position and type_info(value).protected
                     and not isinstance(value, Redacted)):
-                # R11 runtime complement (ADR-008, derived — dated 2026-07-15):
-                # the decorator-time rule (_entity._check_r11_lazy_only) cannot
-                # see an Any-typed field, a bare/unparameterised container, or
-                # store.root — this closes the same rule at the one write
-                # boundary the type system can't reach. With both halves in
-                # place, link()/_materialize_graph can never legally reach an
-                # EAGER protected child, so the read path needs no per-child
-                # check — the single checkpoint is the root of a deref
-                # (Store._load_oid_deref, W3-4). `via_lazy` is the exemption:
-                # a value reached by UNWRAPPING a Lazy[...] handle (below) is
-                # never an eager-ref violation — the field's PERSISTED value
-                # is still the Lazy wrapper; only a DIRECT (non-Lazy) field
-                # value trips this check. A Redacted twin is separately
-                # exempt (it is not an eager-ref violation either) — it is
-                # enqueued as usual and caught by the more specific
+                # R11 runtime complement (ADR-008, derived — dated 2026-07-15;
+                # corrected 2026-07-15 after the Fable read-fence review found a
+                # leak in the first cut): the decorator-time rule
+                # (_entity._check_r11_lazy_only) cannot see an Any-typed field, a
+                # bare/unparameterised container, or store.root — this closes the
+                # same rule at the write boundary the type system can't reach.
+                # The exemption keys on the FIELD POSITION'S decode mode, NOT on a
+                # runtime Lazy wrapper: `swizzle` collapses `Lazy.of(x)` to a bare
+                # `RefToken` for any non-`Lazy[...]`-typed field, so such a field
+                # RE-DECODES eagerly (`_contains_lazy(Any)`/`(list)` is False) and
+                # would eager-materialize the real protected child into a shared,
+                # registered parent for every principal — the deref checkpoint
+                # bypassed entirely. So a protected ref is a violation in any
+                # eager-decoding position, wrapper or not; only a genuinely lazy
+                # position (`spec.lazy_refs`, propagated below) is exempt. A
+                # Redacted twin is separately exempt (not an eager-ref violation)
+                # — enqueued as usual and caught by the more specific
                 # never-committable-twin check at the _register_graph loop top.
                 raise TypeError(
                     f"{type(value).__name__} is protected — protected classes "
-                    "are Lazy-referable only (ADR-008 R11): wrap it in "
-                    "dc.Lazy.of(...) before assigning it"
+                    "are Lazy-referable only (ADR-008 R11). The FIELD must be "
+                    "typed dc.Lazy[...] (e.g. `dc.Lazy["
+                    f"{type(value).__name__}]`): an Any/untyped field, a bare "
+                    "container, or store.root cannot hold a protected reference, "
+                    "because it persists and re-decodes as an eager edge even "
+                    "when the value is wrapped in dc.Lazy.of(...)"
                 )
             oid = oid_of(value)
             if oid is None or oid in self._new or oid in self._dirty:
@@ -2858,13 +2869,20 @@ class Store:
         elif isinstance(value, Lazy):
             target = cast("Lazy[Any]", value).peek()
             if target is not None:
-                self._walk_value(target, queue, container, via_lazy=True)
+                # Propagate the field's decode mode, NOT an unconditional
+                # exemption: a Lazy wrapper in a lazy-typed field stays lazy
+                # (no raise), but a Lazy in an eager position still persists
+                # eager, so the check must still fire on its target.
+                self._walk_value(target, queue, container,
+                                 eager_position=eager_position)
         elif isinstance(value, (list, tuple)):
             for item in cast("tuple[Any, ...]", value):
-                self._walk_value(item, queue, container, via_lazy=via_lazy)
+                self._walk_value(item, queue, container,
+                                 eager_position=eager_position)
         elif isinstance(value, dict):
             for item in cast("dict[Any, object]", value).values():
-                self._walk_value(item, queue, container, via_lazy=via_lazy)
+                self._walk_value(item, queue, container,
+                                 eager_position=eager_position)
 
     def _harvest_live_refs(self, obj: Any) -> set[int]:
         """The OIDs ``obj`` references — direct entity refs and Lazy refs, in
@@ -3164,12 +3182,25 @@ class Store:
         registered: list[int] = []
         fill_queue: deque[tuple[Any, StoredRecord]] = deque()
 
-        def link(child_oid: int) -> Any:
+        def link(child_oid: int, *, root: bool = False) -> Any:
             # The iterative replacement for the old recursive _load_oid follow:
             # return the live object for child_oid, allocating + enqueuing its
             # bare shell if new — WITHOUT filling it here.
+            #
+            # Read-side backstop for ADR-008 R11 (Fable review, 2026-07-15): a
+            # non-root PROTECTED target is NEVER eager-materialized into a
+            # shared, registered parent — that would hand the real instance to
+            # any principal, bypassing the deref checkpoint. It fails closed to
+            # an unloaded Lazy handle instead, so the field's future .get()
+            # routes through the checked deref (_load_oid_deref → real|twin per
+            # principal). The write path (_walk_value) already forbids CREATING
+            # such an edge; this closes the same hole for a record from any
+            # other source (federation, migration, a pre-R11 store). The root is
+            # exempt — _load_oid_deref already authorised it before calling here.
             existing = self._registry.get(child_oid)
             if existing is not None:
+                if not root and type_info(existing).protected:
+                    return Lazy._unloaded(child_oid, self)  # pyright: ignore[reportPrivateUsage]
                 return existing
             rec = cache.get(child_oid) if cache else None
             if rec is None:
@@ -3180,7 +3211,10 @@ class Store:
                     "(v0.x deletes are unchecked, ADR-003) or never committed; "
                     "the reference you followed is stale"
                 )
-            shell = cast("Any", object.__new__(self._ti_for_cid(rec.cid).cls))
+            child_ti = self._ti_for_cid(rec.cid)
+            if not root and child_ti.protected:
+                return Lazy._unloaded(child_oid, self)  # pyright: ignore[reportPrivateUsage]
+            shell = cast("Any", object.__new__(child_ti.cls))
             stamp(shell, child_oid, self, STATE_CLEAN)
             self._registry.add(child_oid, shell)  # before fill: breaks cycles
             registered.append(child_oid)
@@ -3188,7 +3222,7 @@ class Store:
             return shell
 
         try:
-            root = link(root_oid)
+            root = link(root_oid, root=True)
             while fill_queue:
                 obj, rec = fill_queue.popleft()
                 self._fill_entity(obj, rec, link)
