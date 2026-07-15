@@ -258,3 +258,21 @@ def is_root(p: Any) -> bool:
     never be root, whatever memberships someone hands it.
     """
     return p.uid != 0 and p.memberships.get(PUBLIC, VIEWER) >= EXECUTIVE
+
+
+def can_read_row(p: Any, owner: int, groups: Iterable[int], read_floor: int) -> bool:
+    """The ADR-008 ``can_read`` predicate over decoded label values (W3-1) —
+    pure, constructs no entity, touches no registry (the same decode-level
+    doctrine as ``count()``/``pluck()``). Root (R9) is the ONE bypass,
+    checked here so every decode-level caller is uniform;
+    :func:`datacrystal._indexes.readable_bitmap` is the bitmap-compiler twin
+    of this same rule — one predicate, two shapes.
+
+    Note the owner clause is the first disjunct, exactly like ``can_read`` in
+    the ADR: ownership alone grants a read regardless of ``authority_towards``
+    — the personal-best boost inside ``authority_towards`` matters only for
+    the *write* ceiling (R8), not here.
+    """
+    if is_root(p):
+        return True
+    return is_owner(p, owner) or authority_towards(p, owner, groups) >= read_floor

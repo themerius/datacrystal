@@ -379,11 +379,16 @@ def _inject_perm_columns(cls: type, annotations: dict[str, Any]) -> None:
     The R7 LEGACY fill (groups={PUBLIC}, write=ADMIN) is deliberately
     DIFFERENT and lives in the decode-fill sites, never here.
     ``_dc_read_floor`` carries SortedIndex (ADR-004 rule 3) so W3's ``<=``
-    composition stays bitmap-answerable.
+    composition stays bitmap-answerable. ``_dc_owner``/``_dc_groups`` carry
+    Index (ADR-008 W3-1 / D3) so :func:`datacrystal._indexes.readable_bitmap`
+    can compile owner postings and per-group postings — ``_dc_groups`` is a
+    multi-valued (#13) index, one posting per held group id. ``_dc_write_floor``
+    is deliberately NOT indexed: the write gate always decodes it from the
+    prior record, never from a bitmap.
     """
-    annotations["_dc_owner"] = int
+    annotations["_dc_owner"] = Annotated[int, Index]
     setattr(cls, "_dc_owner", dataclasses.field(default=0, init=False))
-    annotations["_dc_groups"] = list[int]
+    annotations["_dc_groups"] = Annotated[list[int], Index]
     setattr(cls, "_dc_groups", dataclasses.field(default_factory=list[int], init=False))
     annotations["_dc_read_floor"] = Annotated[int, SortedIndex]
     setattr(cls, "_dc_read_floor", dataclasses.field(default=VIEWER, init=False))
