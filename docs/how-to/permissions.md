@@ -95,24 +95,34 @@ poisons identity (see
 
 ## Root: the audited break-glass
 
-A principal holding `EXECUTIVE` in the `PUBLIC` group sees and can fix everything, including
-owner-only records nobody ever shared:
+Root is a principal that out-ranks the **world group** — it holds `EXECUTIVE` in the `PUBLIC`
+group, which `is_root` reads as break-glass: it sees and can fix everything, including owner-only
+records nobody ever shared. Build it with `dc.root_principal`:
 
 ```python
-root = dc.Principal(uid=99, memberships={dc.PUBLIC: dc.EXECUTIVE})
+root = dc.root_principal(uid=99)     # == Principal(uid=99, memberships={dc.PUBLIC: dc.EXECUTIVE})
 with store.acting_as(root):
     assert store.get(Specimen, label="Q43010") is not None
 ```
 
-Root introduces no new API — it is a property of the principal's memberships — and every root
-action is still stamped in the delta log under the root actor's uid: break-glass is visible, never
-silent.
+> **`{dc.PUBLIC: dc.EXECUTIVE}` is not a public grant.** `PUBLIC` names the *group* (who — the
+> world group every principal is implicitly in), and `EXECUTIVE` is the *level* (authority).
+> Holding the top level *in* the world group is what makes this one principal root; it does **not**
+> grant the public executive rights. `dc.root_principal(uid=…)` spells that out so the sentinel
+> can't misread in a review diff. Sharing something *to* the world is the opposite direction:
+> `dc.share(rec, dc.PUBLIC, read=dc.VIEWER)`.
+
+Root introduces no new API — it is a property of the principal's memberships (the factory is just
+legible sugar over that pair) — and every root action is still stamped in the delta log under the
+root actor's uid: break-glass is visible, never silent.
 
 ## What is not fenced yet
 
 Permissions enforce on the **live store** today (everything on this page). `store.snapshot()`, the
-`datacrystal[web]` REST/GraphQL surfaces (which read through snapshots), the `datacrystal[fts]`
-sidecar's ranked hits, and `Snapshot.index_bitmaps()` do **not** filter yet — see the honesty notes
+`datacrystal[web]` REST/GraphQL surfaces (which read through snapshots), and the `datacrystal[fts]`
+sidecar's ranked hits do **not** filter yet; and `Snapshot.index_bitmaps()` does not yet fail closed —
+per R12 it will **raise** on protected classes (no honest post-filter of value-keyed postings exists),
+but today it returns raw postings. See the honesty notes
 in [Snapshots](../reference.md#snapshots) and [Full-text search](search.md). Do not point a
 snapshot-backed reader at protected data from a principal that should not see all of it until
 those land (the campaign milestone tracks it as W4).

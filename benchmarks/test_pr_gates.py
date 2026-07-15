@@ -378,9 +378,11 @@ def test_commit_gate_overhead(tmp_path) -> None:
     Budget derivation (the docstring the KICKOFF row cites): the fence's
     marginal work on an update commit is (a) ONE batched ``load_many`` of the
     delta's prior records — the same order of work as the commit's own apply,
-    (b) a partial decode of the four ``_dc_`` columns per prior — strictly
-    less than the full encode the commit already pays, (c) integer compares —
-    negligible. Gate work ≤ the commit's own encode+apply ⇒ ratio ≤ 2.0.
+    (b) one msgpack decode of each prior payload, from which the four ``_dc_``
+    columns are read (msgpack has no partial-column decode) — one decode per
+    prior, of the same order as and bounded by the encode+apply the commit
+    already performs for those same records, (c) integer compares — negligible.
+    Gate work ≤ the commit's own encode+apply ⇒ ratio ≤ 2.0.
     Discipline: UPDATE (DIRTY) commits — priors are the gate's cost center;
     mutate a NON-indexed field so index maintenance is identical noise; NO
     consumers attached (with consumers the plain path also reads priors and

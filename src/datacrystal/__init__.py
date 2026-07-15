@@ -39,6 +39,7 @@ from datacrystal._actors import (
     VIEWER,
     Actor,
     Principal,
+    root_principal,
 )
 from datacrystal._conditions import fields
 from datacrystal._containers import PersistentDict, PersistentList
@@ -115,6 +116,7 @@ __all__ = [
     "entity",
     "fields",
     "Principal",
+    "root_principal",
     "Actor",
     "Permissions",
     "share",
