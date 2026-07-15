@@ -39,7 +39,7 @@ from datacrystal._errors import (
     SchemaMismatchError,
     UniqueViolationError,
 )
-from datacrystal._permissions import PERM_LEGACY_FILLS
+from datacrystal._permissions import PERM_LEGACY_FILLS, PUBLIC, VIEWER, is_root
 from datacrystal._records import RefToken, decode_payload
 from datacrystal._storage.protocol import StorageBackend, StoredRecord
 
@@ -211,6 +211,32 @@ class ClassIndexes:
                     last.setdefault(oid, {})[field] = value
         self._last_values = last
         self._needs_lv_rebuild = False
+
+    def committed_labels(self, oid: int) -> tuple[int, list[int], int] | None:
+        """The ``(owner, groups, read_floor)`` of a COMMITTED row, read from
+        this index's own last-indexed-values memory — O(1), no backend I/O
+        (ADR-008 W3 D1: committed labels, never staged ones, are the read-
+        enforcement truth — a buffered ``share()``/``protect()`` is
+        unvalidated until the W2-5 commit gate rules on it). ``None`` means
+        ``oid`` is not committed in this class; callers treat that as absent
+        (fail closed, never fail open).
+
+        Valid because ADR-008 D3 gives ``_dc_owner``/``_dc_groups``/
+        ``_dc_read_floor`` index markers, so all three are "maintained"
+        fields and present in ``_last_values`` for every committed row of a
+        protected class — legacy rows included, via the build-time R7 fill.
+        ``_dc_write_floor`` carries no marker and is never here; the write
+        gate keeps decoding it from the prior record. Triggers the deferred
+        (#12) rebuild after an index-cache load, exactly like the first
+        write would.
+        """
+        if self._needs_lv_rebuild:
+            self._rebuild_last_values()
+        row = self._last_values.get(oid)
+        if row is None:
+            return None
+        groups = row.get("_dc_groups")
+        return row["_dc_owner"], (list(groups) if groups else []), row["_dc_read_floor"]
 
     def _unindex(self, oid: int, old: dict[str, Any]) -> None:
         for field, value in old.items():
@@ -752,6 +778,51 @@ def _range_slice(ci: ClassIndexes, field: str, op: str, value: Any) -> BitMap64:
         lo, hi = 0, bisect_left(keys, value)
     for key in keys[lo:hi]:
         acc |= postings[key]
+    return acc
+
+
+def readable_bitmap(p: Any, ci: ClassIndexes) -> BitMap64 | None:
+    """The OIDs of ``ci``'s extent readable by ``p`` (ADR-008 W3-1) — the
+    bitmap-compiler twin of :func:`datacrystal._permissions.can_read_row`,
+    same predicate, two shapes. ``None`` means root (R9): "no filter",
+    callers skip the intersect entirely rather than materializing the full
+    extent. Only ever called for a protected class — callers guard on
+    ``ti.protected`` (the W2-9/W3 zero-cost invariant, #21); calling it for
+    an unprotected class would still work (empty ``eq`` lookups) but IS the
+    thing the fitness gate forbids.
+
+    Compiles ``owner-postings ∪ ⋃ per-membership (group-postings ∩
+    read_floor ≤ level)``. Correctness: row-wise ``can_read = is_owner ∨
+    ∃g∈rec.groups: level(p, g) ≥ read_floor`` (ADR-008 Context). A group
+    outside ``p.memberships`` contributes ``NO_STANDING`` (-1), which is
+    below every floor (floors are ≥ ``VIEWER`` by the label verbs'
+    ``_check_level``), so iterating only ``p``'s held memberships (∪ the
+    implicit ``PUBLIC`` one) already covers every group that could pass —
+    skipping the rest is not an approximation. An explicit
+    ``memberships[PUBLIC]`` entry (even a low one) overrides the implicit
+    ``VIEWER`` exactly like :func:`datacrystal._permissions.level` does, and
+    ``_range_slice(..., "<=", NO_STANDING)`` is empty, so a weird negative
+    override still composes correctly. Anonymous (``uid=0``, no
+    memberships): the owner branch is skipped (R7a — uid 0 owns nothing) and
+    the effective membership set is ``{PUBLIC: VIEWER}`` — "reads only
+    PUBLIC-at-VIEWER rows", never raises.
+    """
+    if is_root(p):
+        return None
+    acc = BitMap64()
+    if p.uid != 0:  # R7a: uid 0 is the anonymous principal and owns nothing
+        owned = ci.eq["_dc_owner"].get(p.uid)
+        if owned is not None:
+            acc |= owned
+    memberships = dict(p.memberships)
+    if PUBLIC not in memberships:  # the normative implicit world membership
+        memberships[PUBLIC] = VIEWER
+    group_postings = ci.eq["_dc_groups"]
+    for g, lvl in memberships.items():
+        in_group = group_postings.get(g)
+        if not in_group:
+            continue
+        acc |= in_group & _range_slice(ci, "_dc_read_floor", "<=", lvl)
     return acc
 
 
