@@ -109,6 +109,7 @@ from datacrystal._indexes import (
     QueryPlan,
     explain_plan,
     plan,
+    readable_bitmap,
     windowed_index_order,
 )
 from datacrystal._lazy import BlobHandle, BlobSource, Lazy, LazyReferenceManager
@@ -2327,6 +2328,11 @@ class Store:
         decode that field for every match first (an honest O(matches) cost, the
         same scan a non-indexed predicate pays).
 
+        On a ``protected=True`` class the candidate set is intersected with the
+        current principal's readable OIDs (ADR-008 R12/W3-2) *before* any
+        window/order/hydration — a denied row never reaches the result, never
+        pins a page, and never gets hydrated. Root sees the full match set.
+
         Raises:
             NotAnEntityError: ``target`` is an entity class that is not an
                 ``@entity`` class.
@@ -2351,20 +2357,25 @@ class Store:
         else:
             bitmap, residual = plan(cond, ci)
         candidate = bitmap if bitmap is not None else ci.extent
+        if ti.protected:
+            rb = readable_bitmap(self.principal, ci)
+            if rb is not None:
+                candidate = candidate & rb  # a NEW bitmap — never mutate ci.extent
         if order_by is not None:
             field, descending = parse_order_by(order_by, ti)
             if residual is None:
                 window = self._ordered_window(ti, ci, candidate, field, descending,
                                               limit, offset)
-                return self.get_many(window)
-            objs = [o for o in self.get_many(list(candidate)) if residual.evaluate(o)]
+                return self._get_many_unchecked(window)
+            objs = [o for o in self._get_many_unchecked(list(candidate))
+                    if residual.evaluate(o)]
             return apply_window(_order_by_attr(objs, field, descending), limit, offset)
         if residual is None:
             # #51: take the window LAZILY — a small limit over a huge extent
             # stops after offset+limit instead of listing every candidate OID.
-            return self.get_many(window_iter(candidate, limit, offset))
+            return self._get_many_unchecked(window_iter(candidate, limit, offset))
         oids = list(candidate)  # a residual must consider every candidate, then window
-        objs = [o for o in self.get_many(oids) if residual.evaluate(o)]
+        objs = [o for o in self._get_many_unchecked(oids) if residual.evaluate(o)]
         return apply_window(objs, limit, offset)
 
     def _ordered_window(self, ti: TypeInfo, ci: Any, matched: Any, field: str,
@@ -2562,6 +2573,13 @@ class Store:
         residual. Read-only; builds the class indexes on first use (the
         same one-time O(extent) cost as a first query).
 
+        On a ``protected=True`` class the ``candidates``/``extent`` NUMBERS
+        are post-filtered to the current principal's readable subset
+        (ADR-008 R12: counts leak existence) — root sees the true numbers.
+        The plan itself is untouched: ``condition``/``residual``/``indexed``
+        and ``__str__`` report the query exactly as given, never a
+        "readable" rule (D8 — the planner stays rule-based, no cost model).
+
         Raises:
             NotAnEntityError: ``target`` is an entity class that is not an
                 ``@entity`` class.
@@ -2580,7 +2598,9 @@ class Store:
                 ti.typename, None if cond is None else repr(cond),
                 False, None, 0, 0,
             )
-        return explain_plan(ti.typename, self._index.ensure(ti), cond)
+        ci = self._index.ensure(ti)
+        readable = readable_bitmap(self.principal, ci) if ti.protected else None
+        return explain_plan(ti.typename, ci, cond, readable=readable)
 
     def count(self, target: type | Condition) -> int:
         """How many committed entities match — without hydrating any.
@@ -2592,6 +2612,11 @@ class Store:
         records are read and decoded but **no entity is constructed**.
         Reads committed state (like :meth:`snapshot`, unlike :meth:`query`,
         whose hydrated results show uncommitted in-memory changes).
+
+        On a ``protected=True`` class the count is over the current
+        principal's readable subset, not the raw extent/candidates (ADR-008
+        R12: counts leak existence, so they are post-filtered like every
+        other discovery surface). Root sees the true count.
 
         Raises:
             NotAnEntityError: ``target`` is an entity class that is not an
@@ -2610,11 +2635,20 @@ class Store:
             return 0
         ci = self._index.ensure(ti)
         if cond is None:
+            if ti.protected:
+                rb = readable_bitmap(self.principal, ci)
+                # rb is already a subset of ci.extent — no intersect needed.
+                return len(ci.extent) if rb is None else len(rb)
             return len(ci.extent)
         bitmap, residual = plan(cond, ci)
+        candidate = bitmap if bitmap is not None else ci.extent
+        if ti.protected:
+            rb = readable_bitmap(self.principal, ci)
+            if rb is not None:
+                candidate = candidate & rb  # a NEW bitmap — never mutate ci.extent
         if residual is None:
-            return len(bitmap) if bitmap is not None else len(ci.extent)
-        oids = list(bitmap) if bitmap is not None else list(ci.extent)
+            return len(candidate)
+        oids = list(candidate)
         raw_cond = _raw_condition(residual)
         matches = 0
         for _oid, row in self._iter_raw(ti, oids):
@@ -2645,6 +2679,11 @@ class Store:
         ascending-OID tiebreak; an indexed sort field is ordered from the index,
         an un-indexed one decodes that field for every match first). The sort
         field need not be among the projected ``fields``.
+
+        On a ``protected=True`` class the candidates are intersected with the
+        current principal's readable OIDs before any decode (ADR-008 R12) —
+        including ``pluck(C, "_dc_owner")``, which stays legal: it reveals
+        labels only of rows the caller can already read. Root sees everything.
 
         Raises:
             NotAnEntityError: ``target`` is an entity class that is not an
@@ -2681,6 +2720,10 @@ class Store:
         else:
             bitmap, residual = None, None
         candidate = bitmap if bitmap is not None else ci.extent
+        if ti.protected:
+            rb = readable_bitmap(self.principal, ci)
+            if rb is not None:
+                candidate = candidate & rb  # a NEW bitmap — never mutate ci.extent
         raw_cond = _raw_condition(residual) if residual is not None else None
         single = fields[0] if len(fields) == 1 else None
 
@@ -2734,6 +2777,12 @@ class Store:
         (``WrongThreadError`` / ``StoreClosedError``). The peak live set is
         O(chunk), never O(extent) — walk millions of matches in bounded RAM.
 
+        On a ``protected=True`` class the candidate set is intersected with
+        the readable OIDs of the **session principal in effect at call
+        time** (ADR-008 W3-2) — the session principal is captured at call
+        time, so a stream opened inside ``acting_as(agent)`` keeps yielding
+        ``agent``'s view even after that ``acting_as`` scope has exited.
+
         Additive surface: ``query()``'s signature and list return type stay
         frozen.
 
@@ -2751,9 +2800,11 @@ class Store:
         self._enter()
         cls, cond = query_target(target, "query_iter")
         ti = type_info(cls)
-        return self._query_iter_stream(ti, cond)
+        principal = self.principal  # captured NOW (ADR-008 W3-2), not at iteration time
+        return self._query_iter_stream(ti, cond, principal)
 
-    def _query_iter_stream(self, ti: TypeInfo, cond: Condition | None) -> Iterator[Any]:
+    def _query_iter_stream(self, ti: TypeInfo, cond: Condition | None,
+                           principal: Principal) -> Iterator[Any]:
         if self._cid_by_typename.get(ti.typename) is None:
             self._warn_unseen(ti)
             return
@@ -2762,12 +2813,21 @@ class Store:
             bitmap, residual = None, None
         else:
             bitmap, residual = plan(cond, ci)
-        oids = list(bitmap) if bitmap is not None else list(ci.extent)
+        candidate = bitmap if bitmap is not None else ci.extent
+        if ti.protected:
+            rb = readable_bitmap(principal, ci)
+            if rb is not None:
+                candidate = candidate & rb  # a NEW bitmap — never mutate ci.extent
+        oids = list(candidate)
         for start in range(0, len(oids), _RAW_CHUNK):
-            # get_many hydrates one chunk; reassigning `chunk` each round lets
-            # the previous chunk's non-retained entities be collected (the
-            # O(chunk) bound). get_many() re-enters the owner guard per chunk.
-            chunk = self.get_many(oids[start:start + _RAW_CHUNK])
+            self._guard()  # ADR-001: re-assert before hydrating each new chunk
+            # _get_many_unchecked hydrates one chunk — candidates are already
+            # filtered above under the CAPTURED principal (ADR-008 W3-2); a
+            # checked get_many() would re-derive self.principal and could
+            # re-check under the WRONG (ambient) principal if acting_as() has
+            # since exited. Reassigning `chunk` each round lets the previous
+            # chunk's non-retained entities be collected (the O(chunk) bound).
+            chunk = self._get_many_unchecked(oids[start:start + _RAW_CHUNK])
             if residual is not None:
                 chunk = [o for o in chunk if residual.evaluate(o)]
             for obj in chunk:

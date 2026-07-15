@@ -132,3 +132,42 @@ def test_gate_entry_never_fires_for_unprotected_pending(monkeypatch: Any) -> Non
     with pytest.raises(AssertionError, match="gate ran"):
         store.commit()                   # control: protected DOES call it
     store.close()
+
+
+def test_read_fence_never_compiles_for_unprotected_reads(monkeypatch: Any) -> None:
+    # Scenario E (ADR-008 W3-2): the read-side raise-sentinel. readable_bitmap
+    # — the ONE compiler every query/count/pluck/explain/query_iter branch
+    # calls, imported into datacrystal._store as `readable_bitmap` — must be
+    # structurally unreachable for an unprotected class: every call site
+    # guards on `ti.protected` first, so the Python name is never even looked
+    # up, let alone invoked. A protected control class DOES call it, on every
+    # surface.
+    import datacrystal._store as _store_mod
+
+    store, _, plain, fenced = _seeded()
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("readable_bitmap ran on an unprotected read")
+
+    monkeypatch.setattr(_store_mod, "readable_bitmap", boom)
+
+    # unprotected: none of the five surfaces may call the compiler
+    assert len(store.query(PlainRow)) == len(plain)
+    assert store.count(PlainRow) == len(plain)
+    assert len(store.pluck(PlainRow, "tag")) == len(plain)
+    assert store.explain(PlainRow).extent == len(plain)
+    assert len(list(store.query_iter(PlainRow))) == len(plain)
+
+    # protected control: every surface DOES call it (and the monkeypatch
+    # proves it by raising)
+    with pytest.raises(AssertionError, match="readable_bitmap ran"):
+        store.query(FencedRow)
+    with pytest.raises(AssertionError, match="readable_bitmap ran"):
+        store.count(FencedRow)
+    with pytest.raises(AssertionError, match="readable_bitmap ran"):
+        store.pluck(FencedRow, "tag")
+    with pytest.raises(AssertionError, match="readable_bitmap ran"):
+        store.explain(FencedRow)
+    with pytest.raises(AssertionError, match="readable_bitmap ran"):
+        list(store.query_iter(FencedRow))
+    store.close()

@@ -121,15 +121,28 @@ class QueryPlan:
 
 
 def explain_plan(typename: str, ci: "ClassIndexes",
-                 cond: Condition | None) -> QueryPlan:
+                 cond: Condition | None,
+                 readable: BitMap64 | None = None) -> QueryPlan:
     """Build the :class:`QueryPlan` for one (class extent, condition) pair —
     shared by the live store and snapshots (same two rules on both).
+
+    ``readable`` (ADR-008 R12/D8) post-filters ONLY the reported ``candidates``/
+    ``extent`` numbers — a protected caller's readable OIDs, or ``None`` for
+    "no filter" (root, or an unprotected class/a snapshot caller, W3-2). The
+    planner itself is untouched: ``condition``/``residual``/``indexed`` and
+    ``__str__`` never change shape, and this stays exactly the two-(plus-
+    ADR-004-third)-rule planner — no new Condition type, no new QueryPlan
+    field, no cost model. Defaulting to ``None`` keeps every pre-W3 caller
+    (incl. :class:`~datacrystal.Snapshot`, unenforced until W4/R15) byte-
+    identical.
     """
-    extent = len(ci.extent)
+    extent_bm = ci.extent if readable is None else (ci.extent & readable)
+    extent = len(extent_bm)
     if cond is None:
         return QueryPlan(typename, None, False, None, extent, extent)
     bitmap, residual = plan(cond, ci)
-    candidates = len(bitmap) if bitmap is not None else extent
+    cand_bm = bitmap if bitmap is not None else ci.extent
+    candidates = len(cand_bm) if readable is None else len(cand_bm & readable)
     return QueryPlan(
         typename, repr(cond), bitmap is not None,
         repr(residual) if residual is not None else None,

@@ -829,9 +829,17 @@ class Contact:
   `incoming()`'s protected referrers follow R12/R14 (a denied OID/`Ref`
   item returns a `dc.Redacted` twin — you already held that reference —
   while a denied `incoming()` referrer is silently absent, since backlinks
-  are discovery). `query`/`query_iter`/`count`/`pluck`/`explain` **still
-  return everything, unfiltered by read floor** `[planned — Permissions
-  W3-2]`.
+  are discovery). **`query`/`query_iter`/`count`/`pluck`/`explain` filter
+  too** (ADR-008 W3-2/R12): each returns the current principal's readable
+  subset — the intersect runs before any window/order/hydration/decode, so
+  a denied row never hydrates and never occupies a page slot. `explain()`
+  is the one surface that never drops a row from its *plan*: it
+  post-filters the reported `candidates`/`extent` NUMBERS to the readable
+  subset while `condition`/`residual`/`indexed` keep reporting the query
+  exactly as given (D8 — the two-rule planner never grows a "readable"
+  rule). `query_iter` captures the session principal at **call time**, not
+  iteration time, so a stream survives its opening `acting_as()` scope
+  exiting. Root sees everything, unfiltered, on every surface.
 
 ## Snapshots
 
