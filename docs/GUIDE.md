@@ -26,6 +26,8 @@ Goal-oriented recipes with runnable snippets:
   deriving an indexed field.
 - [Store binary blobs](how-to/blobs.md) — `dc.Blob`, streamed read/write, when to use a `Blob`
   entity.
+- [Restrict who can read a record](how-to/permissions.md) — `protected=True`, `dc.share`, the
+  masked deref (`dc.Redacted`), root break-glass.
 - [Deploy behind FastAPI and GraphQL](how-to/web-deployment.md) — `datacrystal[web]` reflection +
   deployment doctrine.
 - [Run a coordinator + edge followers](how-to/federation.md) — `datacrystal[web]` federation:

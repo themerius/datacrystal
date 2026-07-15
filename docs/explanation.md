@@ -8,6 +8,7 @@ it rather than restating it.
 - [Identity and memory](#identity-and-memory)
 - [Query semantics: the planner, the residual, and the candidate set](#query-semantics-the-planner-the-residual-and-the-candidate-set)
 - [Why deletes are unchecked in v0.x](#why-deletes-are-unchecked-in-v0x)
+- [Permissions: read floors, write floors, and the masked deref](#permissions-read-floors-write-floors-and-the-masked-deref)
 - [Why followers are real local stores (the fractal contract)](#why-followers-are-real-local-stores-the-fractal-contract)
 - [The design philosophy](#the-design-philosophy)
 
@@ -128,6 +129,93 @@ here are the loud signals and dev-time bridges until the real index lands." The 
 semantics and the bridges are in [the Deleting reference](reference.md#deleting); the
 commit-time-vs-follow-time guarantees are in
 [Transactional guarantees → Consistency](reference.md#transactional-guarantees-acid).
+
+## Permissions: read floors, write floors, and the masked deref
+
+datacrystal's native permissions ([ADR-008](design/ADR-008-permissions-contract.md)) resolve a
+tension every embedded, single-writer store hits eventually: agents write curated records next to
+hand-entered ones, personal data sits next to team data, and there is no separate policy engine to
+defer to. The model is deliberately 1970s, not novel machinery — four small indexed columns on a
+`protected=True` record (`owner`, `groups`, `read_floor`, `write_floor`), a `dc.Principal` carrying
+a level per group, and two integer comparisons decide everything (the full mechanics are in
+[Protecting records](reference.md#protecting-records-protectedtrue)):
+
+- **The read check is Bell–LaPadula** (1973, "no read up"): you may read a record only if your
+  authority towards it — the highest level you hold in any group the record is shared with —
+  clears the record's read floor.
+- **The write check is Biba** ("no write up" on integrity, read here as "no write below the
+  floor"): you may change a record — its content *or its own labels* — only if your authority
+  clears the write floor. Crucially, **the write floor binds everyone, including the owner** — no
+  exemption. That asymmetry is the curation guarantee: once a curator ratchets a record's floor up,
+  the agent that created it can never overwrite it again, ever.
+
+Fifty years of audit literature, one integer comparison each. Three things the model deliberately
+is **not**, each a real feature cut for a reason: not field-level (in-record sensitivity is
+expressed by decomposing into entities, not per-field ACLs); not read-time sub-graph inheritance
+(a child inherits its container's labels once, at *write* time, and labels stay stable afterwards
+— classical MLS calls this **tranquility**, and it is exactly what keeps a record's labels
+auditable instead of a moving target that depends on which parent you walked in from); not a
+relationship graph (no Zanzibar/SpiceDB policy language — four fields, two comparisons, no
+graph to evaluate).
+
+### Mask on deref, filter on discovery
+
+Two kinds of read surface need two different failure shapes, and conflating them is how permission
+systems leak existence by accident:
+
+- **Discovery surfaces** — `query`, `query_iter`, `get`, `get_many(cls, key=...)`, `count`,
+  `pluck`, `explain`, `incoming` — answer "what is out there." A denied row is silently **absent**,
+  indistinguishable from a row that never existed. This is the part that is easy to get wrong in
+  the small: a `count()` that visibly dropped the moment a principal without standing ran it would
+  itself be a leak (counts leak existence) — so every discovery surface filters, and none of them
+  ever raises on a denial.
+- **Deref surfaces** — a `Lazy[T]` handle's `.get()`, `get_many(iterable)` over OIDs/refs/handles
+  you already hold — answer "resolve the thing I am already pointing at." You already know it
+  exists (you are holding a reference to it), so denial here is not a discovery leak, and
+  `dc.Redacted` (ADR-008 R14) is the shape that follows from that: `isinstance(x, TheEntityClass)`
+  still holds, traversal never raises, and only *using* the redacted result — reading a field,
+  `dc_permissions`, trying to commit it — raises `ReadDeniedError`. Traversal graceful, use loud: a
+  silently empty value quietly feeding a pipeline would be worse than a named exception.
+
+The masked path is zero-call-site-churn by design — the owner's own framing was not wanting "to
+change all my access code everywhere because I introduced some stricter permissions," so masking
+is the default, not an opt-in flag. The cost of that default is that masking is *implicit*: nothing
+at a call site marks "this may be a stub" except the `isinstance(x, dc.Redacted)` check you're
+expected to make before using something you didn't just discover through a query.
+
+### The sieve property
+
+*One forgotten call site and the concept is a sieve* — the reason this cannot be a convenience
+bolted onto a few obvious surfaces. SQLite and DuckDB have no native answer to row-level
+permissions and push the problem to the application; Postgres row-level security, evaluated
+*inside* the engine rather than at each call site, is the precedent datacrystal follows instead.
+Every read surface enforces the identical predicate — `readable_bitmap()`/`can_read_row()`, the
+readable-set compiler, compiled once and applied the same way whether a surface answers from a
+bitmap, a decode-level scan, or a single registry hit. The proof that this actually holds together
+end to end — not just surface by surface — takes the property literally: one protected record, run
+through *every* live-store read surface in a single loop
+(`tests/unit/test_read_fence_sieve.py`), so a future surface that forgets to call the compiler
+fails there, by construction, instead of three PRs later when someone notices data where it
+shouldn't be.
+
+### This is not cryptography
+
+Labels are metadata the engine enforces — not encryption — and datacrystal never pretends
+otherwise. An embedded, single-writer store cannot defend against hostile same-process code or
+direct access to its `.store` file and sidecars; that is out of scope, stated with the same
+honesty this page states every other guarantee (see [the design philosophy](#the-design-philosophy)
+below). What native permissions *do* buy: confused-deputy protection (an agent cannot accidentally
+see or overwrite a record it has no standing on), correct multi-principal behavior across every
+existing surface (the web extra, followers, background agents), and a native, stamped audit trail
+— every commit records *who*, in the delta log (see
+[the commit-delta pipeline](reference.md#the-commit-delta-pipeline)). And **a mirror of protected
+data is protected data**: the FTS sidecar's SQLite tables and the Arrow mirror's parquet segments
+hold the plaintext of whatever they index, unmasked, on disk today; read-floor enforcement on those
+mirrors — and on snapshots, and the web/GraphQL surfaces built on snapshots — is `[planned — W4]`
+(the honesty notes live with each surface: [Snapshots](reference.md#snapshots),
+[the search how-to](how-to/search.md)). Treat the labels as an internal contract your own
+application code respects by construction, not a perimeter — the perimeter is still whatever
+controls access to the store's files.
 
 ## Why followers are real local stores (the fractal contract)
 
