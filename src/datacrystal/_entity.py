@@ -376,7 +376,7 @@ def _inject_perm_columns(cls: type, annotations: dict[str, Any]) -> None:
     untouched, and the defaults are the R6 BIRTH values (owner=0 'nobody'
     until store()-time stamping, groups=∅, floors VIEWER — inert by
     construction: with no groups, every non-owner's authority is NO_STANDING).
-    The R7 LEGACY fill (groups={PUBLIC}, write=ADMIN) is deliberately
+    The R7 LEGACY fill (groups={WORLD}, write=ADMIN) is deliberately
     DIFFERENT and lives in the decode-fill sites, never here.
     ``_dc_read_floor`` carries SortedIndex (ADR-004 rule 3) so W3's ``<=``
     composition stays bitmap-answerable. ``_dc_owner``/``_dc_groups`` carry

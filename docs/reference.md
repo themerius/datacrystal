@@ -686,8 +686,8 @@ store.commit()                             # stamped: actor=1
 - The **ladder constants** are shipped names, spaced by 100 for later insertions:
   `dc.NO_STANDING` (−1, the absence of any shared group — not grantable), `dc.VIEWER` (0),
   `dc.AGENT` (100), `dc.AUTOMATION` (200), `dc.STAFF` (300), `dc.CURATOR` (400),
-  `dc.ADMIN` (500), `dc.EXECUTIVE` (600) — plus the world group id `dc.PUBLIC` (0; every
-  principal implicitly holds `{PUBLIC: VIEWER}`). Apps may define their own levels on top;
+  `dc.ADMIN` (500), `dc.EXECUTIVE` (600) — plus the world group id `dc.WORLD` (0; every
+  principal implicitly holds `{WORLD: VIEWER}`). Apps may define their own levels on top;
   the order is the semantics.
 - A store opened **without** `principal=` acts as the anonymous principal (`uid=0`) and
   stamps its commits `actor=0` — identity is opt-in, existing programs are unchanged.
@@ -760,7 +760,7 @@ class Contact:
   a `_dc_*` field, and client-supplied `_dc_*` keys are ignored on input.
 - **Retrofitting** `protected=True` onto a class with existing records is additive
   (new lineage row; old records are never rewritten): legacy records decode as
-  owner `0` (nobody), groups `(PUBLIC,)`, read floor `VIEWER`, write floor `ADMIN` —
+  owner `0` (nobody), groups `(WORLD,)`, read floor `VIEWER`, write floor `ADMIN` —
   **readable exactly as before, writable only by a store-wide administrator** until
   relabeled. `migrate()` materializes those values into real columns. The shipped
   `dc.Actor` registry is itself protected under exactly this rule.
@@ -802,11 +802,11 @@ class Contact:
   in is refused). Denial raises `WriteDeniedError` **before the TID** — the
   sequence stays gapless and the buffer stays intact: `discard()` or fix and
   re-commit. Denial is deterministic — `committing()` never retries it.
-- **Break-glass**: a principal holding `EXECUTIVE` in the `PUBLIC` group is
+- **Break-glass**: a principal holding `EXECUTIVE` in the `WORLD` group is
   store **root** — every check passes, including on owner-only records
   (orphan rescue, offboarding). Build it with `dc.root_principal(uid=99)`
-  (legible sugar returning `Principal(uid=99, memberships={dc.PUBLIC:
-  dc.EXECUTIVE})`; extra `memberships=` hats merge in) — `PUBLIC` names the
+  (legible sugar returning `Principal(uid=99, memberships={dc.WORLD:
+  dc.EXECUTIVE})`; extra `memberships=` hats merge in) — `WORLD` names the
   world *group* and `EXECUTIVE` the *level*, so this is out-ranking the world
   group, **not** a grant to the public. No new API: root is a property of the
   principal's memberships, and every root commit is stamped in the delta log —

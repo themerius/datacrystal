@@ -23,8 +23,8 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-PUBLIC = 0
-"""The world group id: every principal implicitly holds ``{PUBLIC: VIEWER}``."""
+WORLD = 0
+"""The world group id: every principal implicitly holds ``{WORLD: VIEWER}``."""
 
 # The ladder — levels within a shared group, spaced by 100 so levels can be
 # inserted without renumbering. NO_STANDING is not a grantable level: it is
@@ -49,7 +49,7 @@ PERM_FIELDS = ("_dc_owner", "_dc_groups", "_dc_read_floor", "_dc_write_floor")
 
 # The R7 LEGACY fill (ADR-008): what a record persisted BEFORE its class
 # turned protected decodes as — read-as-before (every principal implicitly
-# holds {PUBLIC: VIEWER}), writes fenced at the top (ADMIN held in PUBLIC =
+# holds {WORLD: VIEWER}), writes fenced at the top (ADMIN held in WORLD =
 # a store-wide administrator) until someone relabels. DELIBERATELY different
 # from the R6 birth defaults on the injected columns (owner=0/∅/VIEWER/VIEWER):
 # birth labels are stamped at store() time, so the dataclass defaults never
@@ -59,7 +59,7 @@ PERM_FIELDS = ("_dc_owner", "_dc_groups", "_dc_read_floor", "_dc_write_floor")
 # by construction; the W2-5 gate's prior-label decode reuses it too.
 PERM_LEGACY_FILLS: dict[str, "Callable[[], Any]"] = {
     "_dc_owner": lambda: 0,          # nobody — and uid 0 never matches (R7a)
-    "_dc_groups": lambda: [PUBLIC],
+    "_dc_groups": lambda: [WORLD],
     "_dc_read_floor": lambda: VIEWER,
     "_dc_write_floor": lambda: ADMIN,
 }
@@ -223,9 +223,9 @@ def protect(rec: Any, *, read: int | None = None, write: int | None = None) -> N
 def level(p: Any, g: int) -> int:
     """The level ``p`` holds in group ``g`` — with the implicit world
     membership made normative: every principal holds at least ``VIEWER`` in
-    ``PUBLIC``, even ``Principal(uid=0, memberships={})`` (ADR-008).
+    ``WORLD``, even ``Principal(uid=0, memberships={})`` (ADR-008).
     """
-    return p.memberships.get(g, VIEWER if g == PUBLIC else NO_STANDING)
+    return p.memberships.get(g, VIEWER if g == WORLD else NO_STANDING)
 
 
 def is_owner(p: Any, owner: int) -> bool:
@@ -251,13 +251,13 @@ def authority_towards(p: Any, owner: int, groups: Iterable[int]) -> int:
 
 
 def is_root(p: Any) -> bool:
-    """Break-glass (R9): EXECUTIVE held explicitly in PUBLIC = store root —
+    """Break-glass (R9): EXECUTIVE held explicitly in WORLD = store root —
     every permission check passes, incl. on owner-only records; every root
     action still lands stamped in the delta log (visible, never silent).
     ``uid != 0`` is the defensive R7a closure: the anonymous principal can
     never be root, whatever memberships someone hands it.
     """
-    return p.uid != 0 and p.memberships.get(PUBLIC, VIEWER) >= EXECUTIVE
+    return p.uid != 0 and p.memberships.get(WORLD, VIEWER) >= EXECUTIVE
 
 
 def can_read_row(p: Any, owner: int, groups: Iterable[int], read_floor: int) -> bool:

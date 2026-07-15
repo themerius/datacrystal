@@ -34,7 +34,7 @@ OWNER = dc.Principal(uid=2, memberships={TEAM: dc.CURATOR})
 MEMBER = dc.Principal(uid=3, memberships={TEAM: dc.AGENT})       # member-at-floor
 OUTSIDER = dc.Principal(uid=4, memberships={OTHER_TEAM: dc.CURATOR})
 ANON = dc.Principal(uid=0)
-ROOT = dc.Principal(uid=99, memberships={dc.PUBLIC: dc.EXECUTIVE})
+ROOT = dc.Principal(uid=99, memberships={dc.WORLD: dc.EXECUTIVE})
 
 
 @dc.entity(protected=True)

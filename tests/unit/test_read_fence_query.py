@@ -37,7 +37,7 @@ MEMBER_AT_FLOOR = dc.Principal(uid=3, memberships={TEAM: dc.AGENT})
 MEMBER_BELOW_FLOOR = dc.Principal(uid=8, memberships={TEAM: dc.VIEWER})
 OUTSIDER = dc.Principal(uid=4, memberships={OTHER_TEAM: dc.CURATOR})
 ANON = dc.Principal(uid=0)
-ROOT = dc.Principal(uid=99, memberships={dc.PUBLIC: dc.EXECUTIVE})
+ROOT = dc.Principal(uid=99, memberships={dc.WORLD: dc.EXECUTIVE})
 
 PRINCIPALS: dict[str, dc.Principal] = {
     "owner": OWNER,
@@ -84,7 +84,7 @@ ROWS: list[dict[str, Any]] = [
          category="rock", mass_g=10.0, tags=["rare"], note="flag"),
     dict(label="S2", owner=OUTSIDER.uid, groups=[TEAM], floor=dc.VIEWER,
          category="mineral", mass_g=20.0, tags=["common"], note="plain"),
-    dict(label="S3", owner=0, groups=[dc.PUBLIC], floor=dc.VIEWER,
+    dict(label="S3", owner=0, groups=[dc.WORLD], floor=dc.VIEWER,
          category="gem", mass_g=30.0, tags=["rare"], note="plain"),
     dict(label="S4", owner=OWNER.uid, groups=[TEAM], floor=dc.CURATOR,
          category="rock", mass_g=40.0, tags=["common"], note="flag"),
@@ -96,7 +96,7 @@ ROWS: list[dict[str, Any]] = [
          category="rock", mass_g=70.0, tags=["rare"], note="flag"),
     dict(label="S8", owner=0, groups=[], floor=dc.VIEWER,
          category="mineral", mass_g=80.0, tags=["common"], note="plain"),
-    dict(label="S9", owner=0, groups=[dc.PUBLIC], floor=dc.CURATOR,
+    dict(label="S9", owner=0, groups=[dc.WORLD], floor=dc.CURATOR,
          category="gem", mass_g=90.0, tags=["rare"], note="plain"),
 ]
 

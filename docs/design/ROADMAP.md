@@ -81,7 +81,7 @@ The v0.x core landed and the API froze at the v0.1.0 tag (2026-06-13); contracts
 |---|------|----------------------------|
 | 1 | Object engine — slots-dataclasses, msgspec records, OID registry, tri-state dirty tracking, `Lazy[T]`, `@entity(frozen=True)`, batch hydration, unchecked `store.delete()` | [ADR-001](ADR-001-concurrency-contract.md), [ADR-003](ADR-003-delete-semantics.md) |
 | 2 | SQLite-as-blob-store behind the 3-method protocol + single-writer lease lock | `_storage/`, [ADR-002](ADR-002-storage-read-views.md) |
-| 3 | Commit-delta/watermark pipeline (PUBLIC contract) + `store.snapshot()` views | [COMMIT-DELTA-v1](COMMIT-DELTA-v1.md) (LOCKED) |
+| 3 | Commit-delta/watermark pipeline (WORLD contract) + `store.snapshot()` views | [COMMIT-DELTA-v1](COMMIT-DELTA-v1.md) (LOCKED) |
 | 4 | pyroaring bitmap indexes + Condition AST + unique secondary-key index + decode-level `count()`/`pluck()`/`get_many()` | `_indexes`, `_conditions`, GUIDE |
 | 5 | Format hygiene — versioned record header, reserved sealed-flag/footer/tid fields | `_ids`, `_records` |
 | 6 | Deployment docs — workers=1 + asyncio doctrine, command-queue fan-in, Litestream PITR | GUIDE, [SCALING.md](SCALING.md) |

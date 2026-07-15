@@ -47,13 +47,13 @@ from datacrystal._permissions import (  # re-exports, all listed in __all__
     CURATOR,
     EXECUTIVE,
     NO_STANDING,
-    PUBLIC,
+    WORLD,
     STAFF,
     VIEWER,
 )
 
 __all__ = [
-    "PUBLIC",
+    "WORLD",
     "NO_STANDING",
     "VIEWER",
     "AGENT",
@@ -90,22 +90,23 @@ def root_principal(uid: int, memberships: Mapping[int, int] | None = None) -> Pr
     """Construct the store **root** principal — the audited break-glass (R9).
 
     Sugar over the membership sentinel: root is a principal holding
-    ``EXECUTIVE`` in the ``PUBLIC`` (world) group, which :func:`is_root`
-    reads as break-glass. This returns an ordinary :class:`Principal` carrying
-    exactly that ``{PUBLIC: EXECUTIVE}`` pair — it adds no mode, flag, or
-    bypass path (enforcement still keys only on the membership values, never on
-    how the principal was built), so R9's "root introduces no new API surface"
-    holds (ADR-008 R9 amendment 2026-07-15).
+    ``EXECUTIVE`` in the ``WORLD`` group, which :func:`is_root` reads as
+    break-glass. This returns an ordinary :class:`Principal` carrying exactly
+    that ``{WORLD: EXECUTIVE}`` pair — it adds no mode, flag, or bypass path
+    (enforcement still keys only on the membership values, never on how the
+    principal was built), so R9's "root introduces no new API surface" holds
+    (ADR-008 R9 amendment 2026-07-15).
 
-    Prefer this to the literal ``Principal(uid, {PUBLIC: EXECUTIVE})``, which
-    misreads as "grant the public executive rights": ``PUBLIC`` names the
-    GROUP (who), not the grantee, and ``EXECUTIVE`` is the LEVEL (authority) —
-    out-ranking the world group is what makes a principal root. Any extra
-    ``memberships`` (a group→level map, e.g. the actor's ordinary team hats)
-    merge in; the ``PUBLIC: EXECUTIVE`` sentinel always wins for ``PUBLIC``.
+    Prefer this to the bare literal ``Principal(uid, {WORLD: EXECUTIVE})``: it
+    names the intent (this is *root*) and spells the two axes — ``WORLD`` is the
+    GROUP (the compartment everyone is implicitly in), ``EXECUTIVE`` the LEVEL
+    (authority); out-ranking the world group is what makes a principal root, not
+    a grant *to* the world. Any extra ``memberships`` (a group→level map, e.g.
+    the actor's ordinary team hats) merge in; the ``WORLD: EXECUTIVE`` sentinel
+    always wins for ``WORLD``.
     """
     m: dict[int, int] = dict(memberships or {})
-    m[PUBLIC] = EXECUTIVE
+    m[WORLD] = EXECUTIVE
     return Principal(uid=uid, memberships=m)
 
 

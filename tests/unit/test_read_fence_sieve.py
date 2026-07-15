@@ -51,7 +51,7 @@ LABEL = "the-record"
 OWNER = dc.Principal(uid=2, memberships={TEAM: dc.CURATOR})
 OUTSIDER = dc.Principal(uid=4, memberships={OTHER_TEAM: dc.CURATOR})
 ANON = dc.Principal(uid=0)
-ROOT = dc.Principal(uid=99, memberships={dc.PUBLIC: dc.EXECUTIVE})
+ROOT = dc.Principal(uid=99, memberships={dc.WORLD: dc.EXECUTIVE})
 
 # The two principal buckets every surface below is checked against — the
 # ONE place a future principal category would be added to this file's sweep.
@@ -85,14 +85,14 @@ class Cabinet:
 def _seed(store) -> tuple[Specimen, Specimen, Cabinet]:
     """``hidden`` is the record under test: owner-only, unshared birth
     labels (ADR-008 R6) — readable by nobody but OWNER/ROOT. It LINKS to a
-    PUBLIC ``anchor`` Specimen (so ``incoming(anchor)`` can prove ``hidden``
+    WORLD ``anchor`` Specimen (so ``incoming(anchor)`` can prove ``hidden``
     is included/excluded as a referrer), and a ``Cabinet`` holds a direct
     ``Lazy`` handle straight onto ``hidden`` (the deref surfaces).
     """
     with store.acting_as(OWNER):
         anchor = Specimen(label="anchor")
         store.store(anchor)
-        dc.share(anchor, dc.PUBLIC, read=dc.VIEWER, write=dc.VIEWER)
+        dc.share(anchor, dc.WORLD, read=dc.VIEWER, write=dc.VIEWER)
 
         hidden = Specimen(label=LABEL, note="classified", linked=dc.Lazy.of(anchor))
         store.store(hidden)  # stays owner-only — the record under test

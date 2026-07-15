@@ -34,7 +34,7 @@ class TestLadder:
         assert all(b - a == 100 for a, b in zip(ladder, ladder[1:]))
 
     def test_world_group_and_no_standing(self):
-        assert dc.PUBLIC == 0
+        assert dc.WORLD == 0
         assert dc.NO_STANDING == -1  # not a grantable level: absence of standing
 
 

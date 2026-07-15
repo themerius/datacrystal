@@ -95,22 +95,22 @@ poisons identity (see
 
 ## Root: the audited break-glass
 
-Root is a principal that out-ranks the **world group** — it holds `EXECUTIVE` in the `PUBLIC`
+Root is a principal that out-ranks the **world group** — it holds `EXECUTIVE` in the `WORLD`
 group, which `is_root` reads as break-glass: it sees and can fix everything, including owner-only
 records nobody ever shared. Build it with `dc.root_principal`:
 
 ```python
-root = dc.root_principal(uid=99)     # == Principal(uid=99, memberships={dc.PUBLIC: dc.EXECUTIVE})
+root = dc.root_principal(uid=99)     # == Principal(uid=99, memberships={dc.WORLD: dc.EXECUTIVE})
 with store.acting_as(root):
     assert store.get(Specimen, label="Q43010") is not None
 ```
 
-> **`{dc.PUBLIC: dc.EXECUTIVE}` is not a public grant.** `PUBLIC` names the *group* (who — the
-> world group every principal is implicitly in), and `EXECUTIVE` is the *level* (authority).
-> Holding the top level *in* the world group is what makes this one principal root; it does **not**
-> grant the public executive rights. `dc.root_principal(uid=…)` spells that out so the sentinel
-> can't misread in a review diff. Sharing something *to* the world is the opposite direction:
-> `dc.share(rec, dc.PUBLIC, read=dc.VIEWER)`.
+> **Two axes, not one.** In `{dc.WORLD: dc.EXECUTIVE}`, `WORLD` is the *group* (who — the
+> compartment every principal is implicitly in) and `EXECUTIVE` is the *level* (authority).
+> Holding the top level *in* the world group is what makes this one principal root — it does **not**
+> hand the world executive rights. `dc.root_principal(uid=…)` names that intent so the sentinel
+> can't misread in a review diff. Sharing something *to* the world is the opposite direction —
+> `dc.share(rec, dc.WORLD, read=dc.VIEWER)`, which really is "make it public."
 
 Root introduces no new API — it is a property of the principal's memberships (the factory is just
 legible sugar over that pair) — and every root action is still stamped in the delta log under the

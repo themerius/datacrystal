@@ -39,7 +39,7 @@ from datacrystal._errors import (
     SchemaMismatchError,
     UniqueViolationError,
 )
-from datacrystal._permissions import PERM_LEGACY_FILLS, PUBLIC, VIEWER, is_root
+from datacrystal._permissions import PERM_LEGACY_FILLS, WORLD, VIEWER, is_root
 from datacrystal._records import RefToken, decode_payload
 from datacrystal._storage.protocol import StorageBackend, StoredRecord
 
@@ -810,15 +810,15 @@ def readable_bitmap(p: Any, ci: ClassIndexes) -> BitMap64 | None:
     outside ``p.memberships`` contributes ``NO_STANDING`` (-1), which is
     below every floor (floors are ≥ ``VIEWER`` by the label verbs'
     ``_check_level``), so iterating only ``p``'s held memberships (∪ the
-    implicit ``PUBLIC`` one) already covers every group that could pass —
+    implicit ``WORLD`` one) already covers every group that could pass —
     skipping the rest is not an approximation. An explicit
-    ``memberships[PUBLIC]`` entry (even a low one) overrides the implicit
+    ``memberships[WORLD]`` entry (even a low one) overrides the implicit
     ``VIEWER`` exactly like :func:`datacrystal._permissions.level` does, and
     ``_range_slice(..., "<=", NO_STANDING)`` is empty, so a weird negative
     override still composes correctly. Anonymous (``uid=0``, no
     memberships): the owner branch is skipped (R7a — uid 0 owns nothing) and
-    the effective membership set is ``{PUBLIC: VIEWER}`` — "reads only
-    PUBLIC-at-VIEWER rows", never raises.
+    the effective membership set is ``{WORLD: VIEWER}`` — "reads only
+    WORLD-at-VIEWER rows", never raises.
     """
     if is_root(p):
         return None
@@ -828,8 +828,8 @@ def readable_bitmap(p: Any, ci: ClassIndexes) -> BitMap64 | None:
         if owned is not None:
             acc |= owned
     memberships = dict(p.memberships)
-    if PUBLIC not in memberships:  # the normative implicit world membership
-        memberships[PUBLIC] = VIEWER
+    if WORLD not in memberships:  # the normative implicit world membership
+        memberships[WORLD] = VIEWER
     group_postings = ci.eq["_dc_groups"]
     for g, lvl in memberships.items():
         in_group = group_postings.get(g)

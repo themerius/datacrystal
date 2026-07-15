@@ -390,7 +390,7 @@ def test_commit_gate_overhead(tmp_path) -> None:
     before the prior read — a root benchmark would time the bypass).
     """
     n = 200
-    owner = dc.Principal(uid=1001, memberships={dc.PUBLIC: dc.CURATOR})
+    owner = dc.Principal(uid=1001, memberships={dc.WORLD: dc.CURATOR})
 
     prot_store = dc.Store.open(tmp_path / "protected.store", principal=owner)
     plain_store = dc.Store.open(tmp_path / "plain.store", principal=owner)
