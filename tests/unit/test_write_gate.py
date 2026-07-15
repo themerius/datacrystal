@@ -32,7 +32,7 @@ FAKE_ROOT = dc.Principal(uid=0, memberships={dc.PUBLIC: dc.EXECUTIVE})  # R7a
 class Contact:
     name: Annotated[str, dc.Unique]
     org: str = ""
-    link: "Contact | None" = None
+    link: "dc.Lazy[Contact] | None" = None  # R11: protected refs are Lazy-only
 
 
 @dc.entity
@@ -221,7 +221,7 @@ class TestInheritanceBaseline:
         with store.acting_as(AGENT_900):        # TEAM only, no ORG standing
             parent.org = "dirtied"
             kid = Contact(name="kid")
-            parent.link = kid                   # discovered via the container
+            parent.link = dc.Lazy.of(kid)       # discovered via the container
             store.commit()
         kid = store.get(Contact, name="kid")
         assert set(kid._dc_groups) == {TEAM, ORG}   # inherited both
@@ -238,7 +238,7 @@ class TestInheritanceBaseline:
         with store.acting_as(AGENT_900):
             parent.org = "d"
             kid = Contact(name="k3")
-            parent.link = kid
+            parent.link = dc.Lazy.of(kid)
             dc.share(kid, FOREIGN, read=dc.VIEWER, write=dc.VIEWER)  # unheld, explicit
             with pytest.raises(dc.WriteDeniedError, match="no standing"):
                 store.commit()

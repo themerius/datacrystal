@@ -43,6 +43,7 @@ from datacrystal._actors import (
 from datacrystal._conditions import fields
 from datacrystal._containers import PersistentDict, PersistentList
 from datacrystal._permissions import Permissions, protect, share, unshare
+from datacrystal._redacted import Redacted
 from datacrystal._entity import (
     Blob,
     FullText,
@@ -68,6 +69,7 @@ from datacrystal._errors import (
     NewerStoreError,
     NotAnEntityError,
     QueryError,
+    ReadDeniedError,
     SchemaMismatchError,
     SchemaSkewError,
     SponsorRequiredError,
@@ -118,6 +120,7 @@ __all__ = [
     "share",
     "unshare",
     "protect",
+    "Redacted",
     "PUBLIC",
     "NO_STANDING",
     "VIEWER",
@@ -163,6 +166,7 @@ __all__ = [
     "SponsorRequiredError",
     "UncommittedActorError",
     "WriteDeniedError",
+    "ReadDeniedError",
     "UnregisteredTypeError",
     "NewerStoreError",
     "CorruptRecordError",
