@@ -175,7 +175,7 @@ def _view_value(value: Any) -> Any:
         return Ref(oid)
     if isinstance(value, Lazy):
         handle = cast("Lazy[Any]", value)
-        target = handle.peek()  # mirror swizzle(): a loaded handle knows best
+        target = handle._peek_unchecked()  # pyright: ignore[reportPrivateUsage]  # OID only (predicate→Ref)
         if target is not None:
             return _view_value(target)
         if handle.oid is None:

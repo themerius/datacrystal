@@ -2867,7 +2867,7 @@ class Store:
             if oid is None or oid in self._new or oid in self._dirty:
                 queue.append((value, container))
         elif isinstance(value, Lazy):
-            target = cast("Lazy[Any]", value).peek()
+            target = cast("Lazy[Any]", value)._peek_unchecked()  # pyright: ignore[reportPrivateUsage]
             if target is not None:
                 # Propagate the field's decode mode, NOT an unconditional
                 # exemption: a Lazy wrapper in a lazy-typed field stays lazy
@@ -2907,7 +2907,7 @@ class Store:
                 # _walk_value, which follows peek()).
                 vid = lz.oid
                 if vid is None:
-                    target = lz.peek()
+                    target = lz._peek_unchecked()  # pyright: ignore[reportPrivateUsage]
                     vid = oid_of(target) if target is not None else None
                 if vid is not None:
                     out.add(vid)
@@ -3163,6 +3163,29 @@ class Store:
                     return make_twin(ti, oid)  # nothing hydrated, registry untouched
         return self._materialize_graph(oid, cache if cache is not None else {oid: rec})
 
+    def _deref_cached_protected(self, obj: Any, oid: int) -> Any:
+        """Resolve a CACHED protected target (held on a live ``Lazy.of`` handle)
+        to the real instance or a ``dc.Redacted`` twin under the CURRENT
+        principal (ADR-008 R14) — the cross-principal fence for a user handle
+        shared through the live registry.
+
+        The pre-commit window is the wrinkle: a just-``store()``d target is
+        buffered (in ``self._new``) with an OID but no committed labels or
+        registry entry, so :meth:`_load_oid_deref` would raise
+        ``DanglingRefError`` on the creating principal's own in-flight object.
+        There we judge the target's LIVE birth labels instead — the labels it
+        will commit with (tranquility) — so the owner (and root) read their own
+        uncommitted work while an outsider in that window still gets a twin.
+        Once committed, the normal committed-label deref (D1) takes over.
+        """
+        if oid in self._new:
+            p = self.principal
+            if is_root(p) or can_read_row(
+                    p, obj._dc_owner, list(obj._dc_groups), obj._dc_read_floor):
+                return obj
+            return make_twin(type_info(obj), oid)
+        return self._load_oid_deref(oid)
+
     def _materialize_graph(self, root_oid: int,
                            cache: dict[int, StoredRecord] | None) -> Any:
         """Materialize ``root_oid`` and the transitive closure of its EAGER
@@ -3350,7 +3373,7 @@ def _ref_target_oid(value: Any) -> int | None:
     if isinstance(value, Lazy):
         if value.oid is not None:
             return value.oid
-        target = cast("Lazy[Any]", value).peek()
+        target = cast("Lazy[Any]", value)._peek_unchecked()  # pyright: ignore[reportPrivateUsage]
         return oid_of(target) if target is not None else None
     return None
 
@@ -3412,7 +3435,7 @@ def _raw_value(value: Any) -> Any:
             )
         return RefToken(oid)
     if isinstance(value, Lazy):
-        target = cast("Lazy[Any]", value).peek()  # mirror swizzle(): a loaded handle knows best
+        target = cast("Lazy[Any]", value)._peek_unchecked()  # pyright: ignore[reportPrivateUsage]  # OID only, loaded handle knows best
         if target is not None:
             return _raw_value(target)
         if value.oid is None:
@@ -3487,7 +3510,7 @@ def _find_escapee(value: Any) -> str | None:
     if is_entity(value):
         return type(value).__name__
     if isinstance(value, Lazy):
-        target = cast("Lazy[Any]", value).peek()
+        target = cast("Lazy[Any]", value)._peek_unchecked()  # pyright: ignore[reportPrivateUsage]
         return f"Lazy[{type(target).__name__}]" if target is not None else "Lazy"
     if isinstance(value, (list, tuple, set, frozenset)):
         for item in cast("frozenset[object]", value):

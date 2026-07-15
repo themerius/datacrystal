@@ -155,18 +155,54 @@ class Lazy[T]:
                     storeref = None
                 store = storeref() if storeref is not None else None
                 if store is not None:
-                    return cast(T, store._load_oid_deref(oid))
+                    # The store resolves real|twin under the current principal
+                    # AND handles the pre-commit window (a just-stored,
+                    # uncommitted target has no committed labels yet, so a plain
+                    # _load_oid_deref would DanglingRefError on the owner's own
+                    # in-flight object) — see Store._deref_cached_protected.
+                    return cast(T, store._deref_cached_protected(obj, oid))
             return obj
         if self._clock is not None:
             self._atime = self._clock()  # refresh idle time for the manager
         return obj
 
     def peek(self) -> T | None:
+        """The target only if already loaded, else ``None``.
+
+        A PROTECTED target is never exposed here (ADR-008 R14): ``peek`` is a
+        cheap, principal-free inspection, so returning a protected ``_obj``
+        would hand its data to any caller without the deref checkpoint — the
+        leak the Fable read-fence review found in ``.peek()``/``__repr__``
+        after ``.get()`` alone was guarded. Readers must go through
+        :meth:`get` (the checkpoint → real or ``dc.Redacted`` twin); engine
+        write-plumbing that needs only the target's OID uses
+        :meth:`_peek_unchecked`.
+        """
+        obj = self._obj
+        if obj is not None:
+            from datacrystal._entity import type_info
+            if type_info(obj).protected:
+                return None
+        return obj
+
+    def _peek_unchecked(self) -> T | None:
+        """Engine-only: the raw cached target with NO read fence — for write
+        plumbing (swizzle, graph discovery, ref harvesting, predicate→OID
+        translation) that needs the target's OID or typename, never its data.
+        NEVER call from a reader-facing path (use :meth:`get`).
+        """
         return self._obj
 
     def __repr__(self) -> str:
-        if self._obj is not None:
-            return f"Lazy({self._obj!r})"
+        obj = self._obj
+        if obj is not None:
+            from datacrystal._entity import oid_of, type_info
+            if type_info(obj).protected:
+                # Never render a protected target's fields (they include the
+                # _dc_* label columns): repr flows into logs and error
+                # messages, an implicit read surface (ADR-008 R14).
+                return f"Lazy(<protected oid={oid_of(obj)}>)"
+            return f"Lazy({obj!r})"
         return f"Lazy(<unloaded oid={self._oid}>)"
 
 
