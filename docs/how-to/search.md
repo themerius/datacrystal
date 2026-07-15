@@ -43,6 +43,14 @@ minerals = store.get_many([hit.oid for hit in idx.search("Tsumeb", cls=Mineral)]
   not retained — the [snapshot-bootstrap recipe](snapshots-and-delta-log.md)). Reopening with a
   different field/language configuration raises `FtsConfigError`: rebuild, a half-matching index is
   stale.
+- **Protected records (ADR-008 R13):** `protected=True` classes are FTS-indexable — the owner
+  ruled search over protected data in, rather than refusing it — but post-filtering ranked hits to
+  the querying principal's readable set is `[planned — W4]`. Honesty obligation that comes with
+  R13: the index's own SQLite tables hold the **plaintext** of every indexed field on disk right
+  now — a mirror of protected data is protected data, same as the Arrow mirror. Until W4 ships,
+  treat `idx.search()` as reading with full visibility regardless of who is asking; do not attach
+  `FullTextIndex` to a store holding protected data you are not prepared to have wall-to-wall
+  searchable.
 - Honest limits: unsegmented CJK runs are single tokens under unicode61 (`水晶です` is
   findable only as that whole run) `[planned — segmenting tokenizer, demand-driven]`;
   abugida-script languages (hi/ne/ta) are refused loudly rather than silently broken.

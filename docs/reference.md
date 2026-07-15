@@ -421,6 +421,11 @@ the bytes go **out-of-line, raw**, in a sibling `blobs` table, and the record ke
 - **Cost.** A scan of the owning type is independent of blob size (measured: a 5 MB blob → a
   62-byte record). `.bytes()` is one fetch (cached, idle-demotable); `store.open_blob()` reads only
   the ranges you ask for, RSS-bounded.
+- **On a `protected=True` class:** `store.open_blob()` rides the same masked-deref checkpoint as
+  every other field — you need a live (non-`dc.Redacted`) entity in hand to call it, and a twin's
+  field access raises `ReadDeniedError` same as any other field (ADR-008). `snapshot.open_blob()`
+  does **not** enforce the read floor yet — snapshot-layer permissions are `[planned — W4]`, see
+  [Snapshots](#snapshots).
 
 The full mechanics, the streamed-write rules, and *when to reach for a `Blob` entity + `dc.Lazy`
 instead* live in [the blobs how-to](how-to/blobs.md). See
@@ -713,9 +718,15 @@ store.commit()                             # stamped: actor=1
   task spawned **inside** a scope inherits that identity for its own lifetime (contextvar
   semantics) — spawn outside the scope or re-scope in the child; a federation
   `/v1/submit` contribution commits as **anonymous** (`actor=0`) — per-follower
-  principals are `[planned — Permissions W2–W4]`.
-- W1 ships **identity + stamps only**: no permission is checked anywhere yet. Floors and
-  enforcement are `[planned — Permissions W2–W4]` (see the campaign milestone).
+  principals are **deferred beyond this campaign** (ADR-008 R16: contributions keep
+  stamping anonymous; the coordinator refuses protected-class batches pre-flight until
+  followers carry their own identity).
+- W1 shipped **identity + stamps**; enforcement followed in two waves and is **live on
+  the store today**: the W2 write-floor gate (below) fences every commit, and the W3
+  read floor (see [Protecting records](#protecting-records-protectedtrue)) filters
+  every live-store discovery surface and masks every deref. What's still
+  `[planned — W4]`: `Snapshot`/GraphQL/web reads, FTS post-filtering, and
+  `Snapshot.index_bitmaps()`'s refusal (see [Snapshots](#snapshots)).
 
 ## Protecting records (`protected=True`)
 
@@ -853,6 +864,17 @@ def report(store: dc.Store) -> int:        # runs on any thread
         return snap.count((S.quality == "fine") & (S.mass_g >= 100.0))
 ```
 
+- **Permissions honesty note:** the ADR-008 read floor is `[planned — W4]` on every
+  snapshot surface — `snap.get`/`snap.all`/`snap.get_many`/`snap.query`/`snap.count`/
+  `snap.incoming`/`snap.open_blob` decode a protected record's fields (including the
+  four `_dc_*` label columns) exactly like an unprotected one today; nothing is masked
+  or filtered yet. R15 (adopted default) already fixes the shape enforcement will take
+  — a snapshot binds the principal in effect at `snapshot()` time — but the readable-set
+  overlay over the shared per-watermark indexes has not landed. `snap.index_bitmaps()`
+  will additionally **raise on protected classes once W4 lands** (R12: raw postings leak
+  existence *and* label structure, so this one surface refuses rather than half-filters).
+  Until then, do not call `store.snapshot()`/GraphQL/REST reads on a store holding
+  protected data from a principal that should not see it all.
 - `snap.get(oid_or_ref)`, `snap.all(EntityClass)` and `snap.root` return **immutable
   views** (`dc.EntityView`): field access mirrors the live class, entity references are
   explicit `dc.Ref` tokens you resolve via `snap.get(ref)`, lists come back as tuples,
@@ -950,7 +972,10 @@ from datacrystal.web import (
   closes it on shutdown via the lifespan. **`store_lifespan`** is the underlying lifespan if you
   build the app yourself.
 - **`read_snapshot`** — a dependency yielding a per-request, per-watermark pooled `dc.Snapshot`
-  (any thread); a read route reads `EntityView`s / DTOs off it, never live entities.
+  (any thread); a read route reads `EntityView`s / DTOs off it, never live entities. REST and
+  GraphQL reads both ride this snapshot pool, so they inherit its permissions honesty note
+  above: the ADR-008 read floor is `[planned — W4]` here — a protected record's fields decode
+  unmasked over the wire today (see [Snapshots](#snapshots)).
 - **`submit_write`** — a dependency yielding an awaitable that ships a closure to the owner
   thread (via `store.submit()`); the mutation **and** commit run on the owner and `await write(fn)`
   resolves only once durable. Return plain data from the closure — a live entity raises
@@ -1308,6 +1333,7 @@ df = pd.DataFrame(store.pluck(Mineral, "qid", "name", "crystal_system"),
 - How-to guides — [querying & paging](how-to/querying-and-paging.md),
   [ingest & memory](how-to/ingest-and-memory.md),
   [schema evolution](how-to/schema-evolution.md), [blobs](how-to/blobs.md),
+  [restrict who can read a record](how-to/permissions.md),
   [web deployment](how-to/web-deployment.md), [coordinator + edge followers](how-to/federation.md),
   [search](how-to/search.md), [vector & hybrid search](how-to/vector-search.md),
   [analytics](how-to/analytics.md),
