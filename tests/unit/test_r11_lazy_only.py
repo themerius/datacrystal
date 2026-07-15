@@ -121,7 +121,16 @@ def test_runtime_rejects_a_protected_entity_assigned_to_store_root(store):
         store.root = Secret(name="root-secret")
 
 
-def test_runtime_accepts_the_same_value_wrapped_in_lazy(store):
+def test_runtime_rejects_lazy_wrapped_protected_in_an_any_field(store):
+    # Regression for the Fable read-fence review (2026-07-15): wrapping a
+    # protected value in dc.Lazy.of(...) does NOT make an Any/untyped field
+    # safe. `swizzle` erases the wrapper at persistence (Lazy.of(x) → a bare
+    # RefToken), and an Any field re-DECODES eagerly (`_contains_lazy(Any)` is
+    # False), so the real Secret would hydrate into a shared parent for every
+    # principal — the deref checkpoint bypassed. The runtime R11 check must
+    # reject it exactly like a direct ref: the FIELD, not the value, has to be
+    # typed dc.Lazy[...]. (The prior test asserted this COMMITTED — it codified
+    # the leak.)
     @dc.entity
     class Untyped2:
         label: Annotated[str, dc.Unique]
@@ -130,6 +139,49 @@ def test_runtime_accepts_the_same_value_wrapped_in_lazy(store):
     with store.acting_as(CURATOR_ANNA):
         holder = Untyped2(label="y")
         holder.payload = dc.Lazy.of(Secret(name="wrapped"))
-        store.store(holder)
-        store.commit()  # no raise: the Lazy wrapper is the legal form
-    assert store.get(Secret, name="wrapped") is not None
+        with pytest.raises(TypeError, match="Lazy-referable only"):
+            store.store(holder)
+
+
+def test_runtime_rejects_lazy_wrapped_protected_in_bare_list_and_root(store):
+    # Breadth of the same leak (Fable leak_breadth.py): a bare `list` field and
+    # store.root are eager positions too — Lazy.of(protected) must raise in each.
+    @dc.entity
+    class BareListWrap:
+        label: Annotated[str, dc.Unique]
+        items: list = dataclasses.field(default_factory=list)  # bare: eager
+
+    with store.acting_as(CURATOR_ANNA):
+        holder = BareListWrap(label="b")
+        holder.items.append(dc.Lazy.of(Secret(name="in-bare-list")))
+        with pytest.raises(TypeError, match="Lazy-referable only"):
+            store.store(holder)
+
+        with pytest.raises(TypeError, match="Lazy-referable only"):
+            store.root = dc.Lazy.of(Secret(name="root-lazy"))
+
+
+def test_typed_lazy_field_is_the_only_safe_home_and_it_enforces(store):
+    # The positive control the vulnerable test was missing: a properly TYPED
+    # dc.Lazy[Secret] field round-trips AND actually enforces the read fence —
+    # an outsider derefs a Redacted twin, never the real Secret (the leak
+    # scenario, now closed end to end).
+    @dc.entity
+    class Wrapper:
+        label: Annotated[str, dc.Unique]
+        secret: dc.Lazy[Secret] | None = None
+
+    with store.acting_as(CURATOR_ANNA):
+        w = Wrapper(label="w", secret=dc.Lazy.of(Secret(name="top-secret")))
+        store.store(w)
+        store.commit()  # no raise: the typed Lazy field is the legal form
+
+    outsider = dc.Principal(uid=999, memberships={})
+    with store.acting_as(outsider):
+        got = store.get(Wrapper, label="w")  # Wrapper is unprotected
+        assert got is not None and got.secret is not None
+        target = got.secret.get()             # deref through the checkpoint
+        assert isinstance(target, dc.Redacted)  # a twin, not the real Secret
+        assert isinstance(target, Secret)       # still passes isinstance
+        with pytest.raises(dc.ReadDeniedError):
+            _ = target.name                   # using redacted data is loud
