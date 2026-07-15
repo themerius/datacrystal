@@ -66,7 +66,8 @@ class TestShare:
             s.commit()
         s.close()
         s2 = store_factory()
-        back = s2.get(Contact, name="Meyer")
+        with s2.acting_as(ANNA):                # ANNA holds TEAM (ADR-008 read fence)
+            back = s2.get(Contact, name="Meyer")
         assert list(back._dc_groups) == [TEAM]
         assert back._dc_read_floor == dc.VIEWER
         assert back._dc_write_floor == dc.AGENT
@@ -196,7 +197,8 @@ class TestWritableDcPermissions:
             s.commit()
         s.close()
         s2 = store_factory()
-        back = s2.get(Contact, name="child")
+        with s2.acting_as(ANNA):                # ANNA holds TEAM (ADR-008 read fence)
+            back = s2.get(Contact, name="child")
         assert back._dc_owner == 2                     # owner copies verbatim (study)
         assert list(back._dc_groups) == [TEAM]
         assert back._dc_write_floor == dc.CURATOR

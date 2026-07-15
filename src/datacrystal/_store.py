@@ -617,8 +617,15 @@ class Store:
         gates: the row exists, is committed (identity must be durable before
         it acts), and — for a non-human — names a sponsor that resolves to a
         registered committed HUMAN actor (the natural person who answers).
+
+        Reads via :meth:`_get_by_key_unchecked`, NOT :meth:`get` (ADR-008
+        W3-3, the identity-bootstrap bypass): ``Actor`` is protected, and a
+        W2-born row carries owner-only birth labels, so a fenced lookup
+        would raise ``UnknownActorError`` for any session that cannot yet
+        read its own registry row — including the anonymous session
+        resolving its very first ``acting_as(uid)``.
         """
-        actor = self.get(Actor, uid=uid)
+        actor = self._get_by_key_unchecked(Actor, "uid", uid)
         if actor is None:
             raise UnknownActorError(
                 f"no dc.Actor with uid={uid} is registered in this "
@@ -638,7 +645,7 @@ class Store:
                     "is non-human and names no sponsor — set Actor.sponsor to "
                     "the natural person who answers for it"
                 )
-            sponsor = self.get(Actor, uid=actor.sponsor)
+            sponsor = self._get_by_key_unchecked(Actor, "uid", actor.sponsor)
             if sponsor is None or not sponsor.human:
                 raise SponsorRequiredError(
                     f"actor uid={uid} names sponsor {actor.sponsor}, which "
@@ -1079,6 +1086,16 @@ class Store:
         — a duplicate there stays what it always was: a loud
         ``UniqueViolationError`` from ``commit()``.
 
+        On a ``protected=True`` class the natural-key lookup is READ-
+        UNFENCED by design (ADR-008 W3-3): a filtered lookup would
+        duplicate-then-collide instead of merging. Accepted consequence —
+        ``upsert()`` can therefore RETURN a survivor instance the calling
+        principal could not have ``get()``-ed, an existence-plus-data
+        exposure on this one write surface. The commit gate still fences
+        the merge (the write floor applies as always), so nothing is
+        actually written without authority; only the returned READ is
+        broader than the discovery surfaces.
+
         Raises:
             NotAnEntityError: ``obj`` is not an ``@entity`` class instance.
             TypeError: ``key`` was omitted but the class has zero or several
@@ -1177,6 +1194,10 @@ class Store:
             ci = self._index.ensure(ti)
             oid = ci.unique[field].get(value)
             if oid is not None and oid not in self._deleted:
+                # read-enforcement bypass BY DESIGN (ADR-008 W3-3): a
+                # filtered lookup would duplicate-then-collide
+                # (UniqueViolationError at commit); the write gate is the
+                # fence for the merge.
                 return self._load_oid(oid)
         pending = self._pending_upserts.get((ti.cls, field, value))
         if pending is not None:
@@ -2093,6 +2114,11 @@ class Store:
         ``store.get(Mineral, qid="Q43010")``. Returns ``None`` if absent.
         Reflects committed state.
 
+        On a ``protected=True`` class, a key that exists but is unreadable
+        by the current principal (ADR-008) also returns ``None`` — found-
+        but-denied is indistinguishable from absent (R12: discovery never
+        leaks existence). Root sees everything.
+
         Raises:
             NotAnEntityError: ``cls`` is not an ``@entity`` class.
             QueryError: the keyword field is not a ``dc.Unique`` field
@@ -2114,7 +2140,15 @@ class Store:
             return None
         ci = self._index.ensure(ti)
         oid = ci.unique[field].get(value)
-        return None if oid is None else self._load_oid(oid)
+        if oid is None:
+            return None
+        if ti.protected:
+            p = self.principal
+            if not is_root(p):
+                labels = ci.committed_labels(oid)
+                if labels is None or not can_read_row(p, *labels):
+                    return None  # found-but-denied ≡ absent (ADR-008 R12)
+        return self._load_oid(oid)
 
     def get_many(self, refs: Iterable[Any] | type, /, **unique_key: Any) -> list[Any]:
         """Batch-hydrate in one storage round-trip (SDA delta 5: N+1 is
@@ -2125,7 +2159,15 @@ class Store:
 
         The unique-key form returns a list aligned with the given values,
         ``None`` where a key is absent — the bulk twin of :meth:`get`, for
-        ETL upserts that fetch thousands of natural keys at once.
+        ETL upserts that fetch thousands of natural keys at once. Like
+        :meth:`get`, a denied ``protected=True`` key is also a ``None``
+        slot (ADR-008 R12: found-but-denied ≡ absent).
+
+        The iterable (OID / ``Lazy`` / ``Ref`` / entity) form is a DEREF
+        surface, not a filter (ADR-008 R14): a denied-but-existing
+        ``protected=True`` OID/``Ref`` returns a :class:`~datacrystal.Redacted`
+        twin rather than ``None`` — you already hold that reference, so
+        this mirrors ``lazy_ref.get()``, never silently drops it.
 
         Raises:
             NotAnEntityError: an item in the iterable shape is not an OID,
@@ -2174,11 +2216,11 @@ class Store:
                 if lazy.loaded or oid is None:
                     out.append(lazy.get())
                 else:
-                    out.append(self._load_oid(oid, cache))
+                    out.append(self._load_oid_deref(oid, cache))
             elif isinstance(item, int):
-                out.append(self._load_oid(item, cache))
+                out.append(self._load_oid_deref(item, cache))
             elif isinstance(item, Ref):
-                out.append(self._load_oid(item.oid, cache))
+                out.append(self._load_oid_deref(item.oid, cache))
             else:
                 out.append(item)
         return out
@@ -2203,9 +2245,60 @@ class Store:
             if oid is not None and self._registry.get(oid) is None
         ]
         cache = self._backend.load_many(missing) if missing else {}
+        if ti.protected:
+            # get()'s twin for a bulk key lookup (ADR-008 W3-3): a denied row
+            # is a None slot, exactly like a missing key (R12) — the list
+            # stays aligned with `values` either way. `p`/`root` are hoisted
+            # once, not per-oid.
+            p = self.principal
+            root = is_root(p)
+            out: list[Any] = []
+            for oid in oids:
+                if oid is None:
+                    out.append(None)
+                    continue
+                if not root:
+                    labels = ci.committed_labels(oid)
+                    if labels is None or not can_read_row(p, *labels):
+                        out.append(None)  # found-but-denied ≡ absent (R12)
+                        continue
+                out.append(self._load_oid(oid, cache))
+            return out
         return [
             None if oid is None else self._load_oid(oid, cache) for oid in oids
         ]
+
+    def _get_many_unchecked(self, oids: Iterable[int]) -> list[Any]:
+        """Hydrate committed OIDs with NO read enforcement (ADR-008 W3-3).
+
+        Internal plumbing for callers that have already filtered the OID
+        set under the relevant principal (``query``/``query_iter``'s
+        post-intersect hydration, W3-2) or that are write plumbing that
+        must see every record regardless of who is acting (``migrate``).
+        Never exposed publicly — every public read surface goes through the
+        checked ``get``/``get_many``/deref path instead.
+        """
+        oids = list(oids)
+        missing = [o for o in oids if self._registry.get(o) is None]
+        cache = self._backend.load_many(missing) if missing else {}
+        return [self._load_oid(o, cache) for o in oids]
+
+    def _get_by_key_unchecked(self, cls: type, field: str, value: Any) -> Any | None:
+        """``get()`` minus the read fence (ADR-008 W3-3) — the identity-
+        bootstrap seam.
+
+        Used by :meth:`_resolve_registry_actor`: ``Actor`` is protected and
+        a W2-born row carries owner-only birth labels, so a fenced lookup
+        would make ``acting_as(uid)`` raise ``UnknownActorError`` for any
+        session that cannot yet read its own registry row — including every
+        anonymous-to-login flow. Resolution is identity plumbing
+        ("authenticate outside, remember inside"), not disclosure.
+        """
+        ti = type_info(cls)
+        if self._cid_by_typename.get(ti.typename) is None:
+            return None
+        oid = self._index.ensure(ti).unique[field].get(value)
+        return None if oid is None else self._load_oid(oid)
 
     def query(self, target: type | Condition, *, limit: int | None = None,
               offset: int = 0, order_by: Any = None) -> list[Any]:
@@ -2302,6 +2395,13 @@ class Store:
         names the now-dangling referrers — ADR-003). The same backlinks at a
         pinned watermark are :meth:`Snapshot.incoming`.
 
+        The reverse index is class-blind, so this is a DISCOVERY surface
+        (ADR-008 R12): a ``protected=True`` referrer the current principal
+        cannot read is silently absent from the result — backlinks never
+        leak existence — filtered at decode level, with zero extra backend
+        I/O beyond the hydration a readable referrer needed anyway. Root
+        sees every referrer.
+
         Raises:
             NotAnEntityError: ``entity`` is not an ``@entity`` class instance.
             WrongThreadError: called from a thread other than the store's
@@ -2319,7 +2419,37 @@ class Store:
         referrers = self._index.ensure_reverse().get(oid)
         if referrers is None:
             return []
-        return self.get_many(list(referrers))
+        oids = list(referrers)
+        p = self.principal
+        if is_root(p):
+            return self._get_many_unchecked(oids)
+        survivors: list[int] = []
+        to_load: list[int] = []
+        for oid in oids:
+            obj = self._registry.get(oid)
+            if obj is not None:
+                ti_r = type_info(obj)
+                if not ti_r.protected:
+                    survivors.append(oid)
+                    continue
+                labels = self._index.ensure(ti_r).committed_labels(oid)
+                if labels is not None and can_read_row(p, *labels):
+                    survivors.append(oid)
+                continue
+            to_load.append(oid)
+        cache = self._backend.load_many(to_load) if to_load else {}
+        for oid in to_load:
+            rec = cache.get(oid)
+            if rec is None:
+                continue  # racing delete fold — the posting outlived the record (ADR-003)
+            ti_r = self._ti_for_cid(rec.cid)
+            if ti_r.protected:
+                owner, groups, read_floor, _write_floor = self._prior_labels(rec)
+                if not can_read_row(p, owner, groups, read_floor):
+                    continue
+            survivors.append(oid)
+        survivors.sort()  # deterministic ascending-OID order
+        return [self._load_oid(o, cache) for o in survivors]
 
     def verify(self) -> list[tuple[str, int]]:
         """Decode every committed record against the current code, **without
@@ -2408,7 +2538,11 @@ class Store:
                 continue
             oids = [rec.oid for c in stale for rec in self._backend.scan_type(c)]
             for start in range(0, len(oids), batch):
-                chunk = self.get_many(oids[start:start + batch])
+                # write plumbing (ADR-008 W3-3 bypass): migrate must see and
+                # re-persist EVERY stale record regardless of the migrating
+                # principal's read standing — labels ride verbatim, and the
+                # commit-P1 write gate still fences each chunk.
+                chunk = self._get_many_unchecked(oids[start:start + batch])
                 for obj in chunk:
                     self.mark_dirty(obj)
                 self.commit()

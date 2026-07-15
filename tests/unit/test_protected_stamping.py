@@ -86,19 +86,21 @@ class TestOwnerStamping:
             d.lazy_gem = dc.Lazy.of(Gem(name="opal"))              # another Lazy scalar field
             store.commit()
 
-        for name in ("amethyst", "citrine", "opal"):
-            gem = store.get(Gem, name=name)
-            assert gem._dc_owner == 2, name           # acting principal, NOT the container's
-            assert list(gem._dc_groups) == [ORG], name
-            assert gem._dc_read_floor == dc.VIEWER, name
-            assert gem._dc_write_floor == dc.STAFF, name
+        with store.acting_as(ANNA):             # she holds ORG (ADR-008 read fence)
+            for name in ("amethyst", "citrine", "opal"):
+                gem = store.get(Gem, name=name)
+                assert gem._dc_owner == 2, name           # acting principal, NOT the container's
+                assert list(gem._dc_groups) == [ORG], name
+                assert gem._dc_read_floor == dc.VIEWER, name
+                assert gem._dc_write_floor == dc.STAFF, name
 
     def test_child_without_protected_container_keeps_birth_labels(self, store):
         with store.acting_as(ANNA):
             shelf = PlainShelf(label="loose", prize=dc.Lazy.of(Gem(name="quartzite")))
             store.store(shelf)
             store.commit()
-        gem = store.get(Gem, name="quartzite")
+        with store.acting_as(ANNA):             # she is the owner (ADR-008 read fence)
+            gem = store.get(Gem, name="quartzite")
         assert gem._dc_owner == 2
         assert list(gem._dc_groups) == []             # unprotected container → no inheritance
         assert gem._dc_write_floor == dc.VIEWER
@@ -114,7 +116,8 @@ class TestOwnerStamping:
             first.prize = dc.Lazy.of(shared)            # registers via `first` NOW
             second.prize = dc.Lazy.of(shared)           # already registered — no relabel
             store.commit()
-        gem = store.get(Gem, name="shared")
+        with store.acting_as(ANNA):             # she holds ORG (ADR-008 read fence)
+            gem = store.get(Gem, name="shared")
         assert gem._dc_write_floor == dc.STAFF         # first container's labels stuck
 
     def test_commit_time_discovery_stamps_under_commit_principal(self, store):
@@ -124,7 +127,8 @@ class TestOwnerStamping:
         with store.acting_as(BOB):
             d.prize = dc.Lazy.of(Gem(name="latecomer"))  # only P1 discovery sees this
             store.commit()
-        gem = store.get(Gem, name="latecomer")
+        with store.acting_as(BOB):              # he holds ORG (ADR-008 read fence)
+            gem = store.get(Gem, name="latecomer")
         assert gem._dc_owner == 3                      # the COMMIT-time principal
         assert list(gem._dc_groups) == [ORG]           # inherited from the drawer
 
@@ -145,8 +149,8 @@ class TestAnonymousRefusal:
             store.commit()                             # anonymous session
         with store.acting_as(ANNA):
             tid_after = store.commit()                 # buffer intact — retry re-stamps
+            assert store.get(Gem, name="smuggled")._dc_owner == 2  # she is the owner
         assert tid_after == tid_before + 1             # invariant 5: no TID burned
-        assert store.get(Gem, name="smuggled")._dc_owner == 2
 
     def test_unprotected_writes_stay_anonymous_friendly(self, store):
         store.store(PlainShelf(label="anon-ok"))
@@ -222,7 +226,8 @@ class TestLegacyFill:
             s.commit()
         s.close()
         s2 = store_factory()
-        row = s2.get(V2, name="born-protected")
+        with s2.acting_as(ANNA):                # she is the owner (ADR-008 read fence)
+            row = s2.get(V2, name="born-protected")
         assert row._dc_owner == 2                      # persisted stamp, not a fill
         assert row._dc_write_floor == dc.VIEWER        # R6 birth, NOT R7's ADMIN
         s2.close()
@@ -320,7 +325,7 @@ class TestUpsertShield:
             assert second is first
             assert first._dc_owner == 2                # probe defaults never copied
             store.commit()
-        assert store.get(Gem, name="zircon")._dc_owner == 2
+            assert store.get(Gem, name="zircon")._dc_owner == 2  # she is the owner
 
     def test_data_fields_still_merge(self, store):
         with store.acting_as(ANNA):

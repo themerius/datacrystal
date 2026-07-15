@@ -63,7 +63,7 @@ class TestWriteFloor:
             with pytest.raises(dc.WriteDeniedError, match="write floor"):
                 store.commit()
             store.discard()
-        assert store.get(Contact, name="Meyer").org == ""
+            assert store.get(Contact, name="Meyer").org == ""  # AGENT_900 holds TEAM
 
     def test_the_floor_binds_the_owner_too(self, store):
         # The curation guarantee: the STAFF owner created it, the curator
@@ -90,14 +90,14 @@ class TestWriteFloor:
             with pytest.raises(dc.WriteDeniedError, match="delete"):
                 store.commit()
             store.discard()
-        assert store.get(Contact, name="Meyer") is not None
+            assert store.get(Contact, name="Meyer") is not None  # AGENT_900 holds TEAM
 
     def test_clearing_principal_writes_fine(self, store):
         c = _curated_contact(store)
         with store.acting_as(CURATOR):
             c.org = "curated edit"
             store.commit()
-        assert store.get(Contact, name="Meyer").org == "curated edit"
+            assert store.get(Contact, name="Meyer").org == "curated edit"
 
     def test_outside_authority_does_not_carry(self, store):
         # EXECUTIVE in ORG means nothing towards a TEAM-shared record.
@@ -223,7 +223,7 @@ class TestInheritanceBaseline:
             kid = Contact(name="kid")
             parent.link = dc.Lazy.of(kid)       # discovered via the container
             store.commit()
-        kid = store.get(Contact, name="kid")
+            kid = store.get(Contact, name="kid")  # AGENT_900 holds inherited TEAM
         assert set(kid._dc_groups) == {TEAM, ORG}   # inherited both
         assert kid._dc_owner == AGENT_900.uid
 
@@ -280,7 +280,7 @@ class TestRoot:
         with store.acting_as(ROOT):                    # nobody else could
             c.org = "rescued"
             store.commit()
-        assert store.get(Contact, name="orphan").org == "rescued"
+            assert store.get(Contact, name="orphan").org == "rescued"  # root reads too
 
     def test_root_bypasses_floor_and_ceiling_and_is_stamped(self, store):
         c = _curated_contact(store)
@@ -323,8 +323,8 @@ class TestDenialMechanics:
                 store.commit()
         with store.acting_as(CURATOR):                 # fix the IDENTITY, retry
             tid_after = store.commit()                 # same buffered change
+            assert store.get(Contact, name="Meyer").org == "denied"  # buffer survived
         assert tid_after == tid_before + 1             # invariant 5: no TID burned
-        assert store.get(Contact, name="Meyer").org == "denied"  # buffer survived
 
     def test_committing_never_retries_a_denial(self, store):
         c = _curated_contact(store)

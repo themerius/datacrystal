@@ -208,7 +208,8 @@ def test_from_pydantic_roundtrips_a_protected_create_face(store_factory) -> None
     with s.acting_as(dc.Principal(uid=7)):     # protected creation needs identity (R6)
         s.store(rec)
         s.commit()
-    assert s.get(CuratedContact, name="Meyer Solartechnik GmbH") is not None
+        # uid=7 is the owner (ADR-008 read fence)
+        assert s.get(CuratedContact, name="Meyer Solartechnik GmbH") is not None
     s.close()
 
 
