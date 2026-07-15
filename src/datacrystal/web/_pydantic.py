@@ -60,6 +60,7 @@ from pydantic.fields import FieldInfo
 from datacrystal._entity import EntityMeta, is_entity, oid_of, type_info
 from datacrystal._lazy import BlobHandle, Lazy
 from datacrystal._records import BlobToken, RefToken
+from datacrystal._redacted import Redacted
 from datacrystal._snapshot import EntityView, Ref
 from datacrystal.web._reflect import FieldDescriptor, list_ref_target, reflect
 
@@ -204,7 +205,26 @@ def to_pydantic(
     the output-shaped ``"public"`` — which carries the source's ``oid`` (``view.oid``
     for a snapshot view, the engine OID for a live entity) so a FastAPI route can
     return it under ``response_model=EntityPublic``.
+
+    Read fence (ADR-008 W4-4): a :class:`~datacrystal.Redacted` source — a
+    found-but-denied protected row a snapshot handed back as a redacted twin —
+    projects to ``None`` (wire-null / absent), NEVER a DTO: its data fields are
+    withheld (``getattr`` on the twin RAISES :class:`ReadDeniedError`), so a
+    denied reference renders as a null field, never a 500 and never an existence
+    leak. The check is FIRST — a :class:`~datacrystal.RedactedView` also passes
+    ``isinstance(_, EntityView)``, so it must be caught before the view branch.
+    The return is annotated ``BaseModel`` (not ``BaseModel | None``): a
+    ``Redacted`` twin only ever arrives from a **deref** surface (``get_many`` /
+    a resolved ref), and every such call site fences the twin to null at the
+    boundary — so the 99% real-source contract keeps the un-optional type, and a
+    caller that DOES pass a deref result guards ``isinstance(_, dc.Redacted)`` (or
+    checks the returned value) before use, exactly as the ratified projection does.
     """
+    if isinstance(source, Redacted):
+        # Wire-null projection (W4-4), not a DTO — see the docstring for why the
+        # annotation stays ``BaseModel``: the twin arrives only from a fenced
+        # deref boundary, which maps this None to null before any field access.
+        return None  # pyright: ignore[reportReturnType]  # documented wire-null return
     cls: type
     values: dict[str, Any]
     oid: int | None
@@ -270,6 +290,12 @@ def from_pydantic(model_instance: pydantic.BaseModel, cls: type, *, store: Any =
     here.
     """
     _, descriptors = reflect(cls)  # raises NotAnEntityError loudly for a non-@entity class
+    # Labels are library-managed (ADR-008): reflect() already drops every ``_dc_*``
+    # permission column (_reflect.py), so ``descriptors`` names only the entity's
+    # declared data fields. field_values is built EXCLUSIVELY from those names, so
+    # a client-supplied ``_dc_owner`` / ``_dc_read_floor`` on an inbound DTO can
+    # never reach the ``cls(**field_values)`` constructor — an attacker cannot
+    # spoof a read/write floor through the request edge (W4-4).
     field_values: dict[str, Any] = {}
     # A ref field to resolve via the store: its name, the FieldDescriptor, whether
     # it is a list-of-ref edge (#103), and the OIDs (one for a scalar ref, many

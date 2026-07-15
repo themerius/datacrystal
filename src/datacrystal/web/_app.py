@@ -137,7 +137,15 @@ class _SnapshotPool:
                 if cur is not None:
                     cur.retired = True
                     self._maybe_close(cur)
-                cur = _PooledSnapshot(self._store.snapshot())
+                # The pool's BASE snapshot is pinned to the ANONYMOUS principal
+                # EXPLICITLY (ADR-008 W4-4): the shared per-watermark core must
+                # never capture the operator's ambient store-opening identity —
+                # a bare ``snapshot()`` binds ``store.principal`` (fail-OPEN if
+                # the operator is root). ``Principal(uid=0)`` fails CLOSED: the
+                # base reads no protected row, and each request rides its own
+                # identity on top via ``Snapshot.for_principal`` (O(1), one core
+                # per watermark — principals never fork the core).
+                cur = _PooledSnapshot(self._store.snapshot(principal=Principal(uid=0)))
                 self._current = cur
             cur.refs += 1
             return cur
@@ -274,8 +282,41 @@ def get_store(request: Request) -> Store:
     return store
 
 
-def read_snapshot(request: Request) -> Iterator[Snapshot]:
-    """Yield the **pooled** snapshot for the current watermark (#104).
+def get_principal() -> Principal | None:
+    """The per-request identity seam (epic #168 W2-8, ADR-008).
+
+    Default: ``None`` → every web write runs (and stamps) as the **anonymous**
+    principal — never the operator's store-opening identity: a request is a
+    third party's write, and stamping it with the ambient principal would put
+    remote work under the operator's name in the permanent audit log (the same
+    identity-honesty rule as federation contributions). On the READ path (W4-4)
+    ``None`` likewise means the anonymous reader — the pool's base snapshot is
+    already pinned to ``Principal(uid=0)``, so a request with no resolved
+    identity reads exactly the anonymous readable set (fail-closed).
+
+    Apps override it FastAPI-style — the resolver may take its own
+    dependencies (headers, OIDC claims, sessions)::
+
+        def resolve(request: Request) -> dc.Principal | None:
+            claims = verify(request.headers.get("authorization"))
+            return dc.Principal(uid=claims.uid, memberships=claims.groups)
+
+        app.dependency_overrides[get_principal] = resolve
+
+    Return a **Principal object**, never a bare uid — ``acting_as(uid)``
+    resolves through the Actor registry with the sponsor gate, which is the
+    wrong semantics for verified-claims identities ("authenticate outside").
+    A denied write (``WriteDeniedError``) surfaces to the client as **403**.
+    """
+    return None
+
+
+def read_snapshot(
+    request: Request,
+    principal: Principal | None = Depends(get_principal),
+) -> Iterator[Snapshot]:
+    """Yield the **pooled** snapshot for the current watermark, bound to the
+    per-request principal (#104, ADR-008 W4-4).
 
     The **read** dependency: ``snap: Snapshot = Depends(read_snapshot)``. A
     snapshot is a frozen read view at the durable watermark, callable from **any
@@ -295,39 +336,24 @@ def read_snapshot(request: Request) -> Iterator[Snapshot]:
     teardown even if the handler raises; the snapshot's WAL read txn is released
     when a commit supersedes its watermark and its last reader drains, or on
     shutdown — not per request.
+
+    The **principal** rides on top of the shared core (ADR-008 R15): the pooled
+    base is the ANONYMOUS handle, and :meth:`Snapshot.for_principal` derives a
+    sibling handle over the SAME core in O(1) — no index rebuild, no second core.
+    So two principals at one watermark share the one built index; each only
+    intersects its own readable bitmap (discovery) / checks ``can_read_row``
+    (deref). ``principal is None`` reads as the anonymous base directly.
     """
     pool = _get_pool(request)
     pooled = pool.acquire()
     try:
-        yield pooled.snapshot
+        yield (
+            pooled.snapshot
+            if principal is None
+            else pooled.snapshot.for_principal(principal)
+        )
     finally:
         pool.release(pooled)
-
-
-def get_principal() -> Principal | None:
-    """The per-request identity seam (epic #168 W2-8, ADR-008).
-
-    Default: ``None`` → every web write runs (and stamps) as the **anonymous**
-    principal — never the operator's store-opening identity: a request is a
-    third party's write, and stamping it with the ambient principal would put
-    remote work under the operator's name in the permanent audit log (the same
-    identity-honesty rule as federation contributions).
-
-    Apps override it FastAPI-style — the resolver may take its own
-    dependencies (headers, OIDC claims, sessions)::
-
-        def resolve(request: Request) -> dc.Principal | None:
-            claims = verify(request.headers.get("authorization"))
-            return dc.Principal(uid=claims.uid, memberships=claims.groups)
-
-        app.dependency_overrides[get_principal] = resolve
-
-    Return a **Principal object**, never a bare uid — ``acting_as(uid)``
-    resolves through the Actor registry with the sponsor gate, which is the
-    wrong semantics for verified-claims identities ("authenticate outside").
-    A denied write (``WriteDeniedError``) surfaces to the client as **403**.
-    """
-    return None
 
 
 async def submit_write(
@@ -414,6 +440,10 @@ def graphql_context_getter(
     the GraphQL request reads the **same pooled snapshot** a REST route gets
     (#104, one per commit watermark) and its refcount is released in the request
     teardown — Strawberry's ``context_getter`` has no teardown hook of its own.
+    It is the **principal-bound** handle (ADR-008 W4-4): the fence rides in on
+    :func:`read_snapshot`'s ``for_principal`` derivation, so every GraphQL field —
+    the root query and every DataLoader-batched reference edge — reads through the
+    request principal's readable set, identically to REST.
 
     From that one snapshot the context carries a **fresh**
     :class:`~datacrystal.web.SnapshotLoader` (``cache=False``) via
