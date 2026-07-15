@@ -275,6 +275,104 @@ def test_newer_mirror_format_refused(tmp_path, store_factory) -> None:
     store.close()
 
 
+# -- W4-7: a class that flips to protected=True mid-life --------------------------
+#
+# A mirror already holding pre-protection parquet segments (columns: the plain
+# fields, no _dc_* labels) keeps consuming once the class turns protected — the
+# NEW segments carry the four _dc_* label columns. The segment-promotion lattice
+# must fold the two shapes into one readable table (pre-protection rows get null
+# labels — the incremental mirror never rewrites already-mirrored rows), and a
+# root re-bootstrap (a full copy, migrate() precedent) must materialize the R7
+# legacy fill for the pre-protection rows. Mirroring protected data demands the
+# audited store root: a non-root bootstrap fails closed. Simulated with the same
+# same-typename retrofit pattern the store's own R7 stamping tests use.
+
+ORG = 1
+ANNA = dc.Principal(uid=2, memberships={ORG: dc.CURATOR})
+_RELIC = "tests.extras.test_arrow:Relic"
+
+
+def _relic(*, protected: bool):
+    """(Re)define the 'Relic' entity — same typename each call, so persisted
+    records decode through their own lineage row (simulating a protected=True
+    retrofit between runs, exactly like the store's R7 stamping tests)."""
+    ns: dict = {
+        "__module__": __name__,
+        "__qualname__": "Relic",
+        "__annotations__": {"name": Annotated[str, dc.Unique], "grade": str},
+        "grade": "common",
+    }
+    return dc.entity(type("Relic", (), ns), protected=protected)
+
+
+def test_flip_to_protected_promotes_labels_across_segments(store_factory,
+                                                           tmp_path) -> None:
+    # 1) pre-protection: two unprotected Relics mirror to an OLD segment whose
+    #    schema carries the plain fields only — no _dc_* label columns.
+    Relic1 = _relic(protected=False)
+    store = store_factory()
+    path = tmp_path / "relic.mirror"
+    mirror = ArrowMirror(path)
+    store.attach(mirror)
+    store.root = [Relic1(name="w1-a", grade="fine"),
+                  Relic1(name="w1-b", grade="common")]
+    store.commit()
+    store.detach(mirror)
+    mirror.close()
+    store.close()  # single-writer sqlite: release the lock before reopening
+    assert "_dc_owner" not in mirror._tables[_RELIC].columns   # unlabelled segment
+
+    # 2) the class flips protected; a NEW protected Relic commits through the
+    #    reopened mirror → a NEW segment carrying the four _dc_* label columns.
+    Relic2 = _relic(protected=True)
+    store2 = store_factory()
+    reopened = ArrowMirror(path)
+    assert reopened.watermark == mirror.watermark              # resumes, no gap
+    store2.attach(reopened)
+    with store2.acting_as(ANNA):
+        fresh = Relic2(name="w2-new", grade="rare")
+        store2.store(fresh)
+        dc.share(fresh, ORG, read=dc.VIEWER, write=dc.CURATOR)
+        store2.commit()
+
+    # the promotion lattice folds the unlabelled + labelled segments into one
+    # readable table (fitness: incremental mirror stays consistent across a flip).
+    tbl = reopened.table(Relic2)
+    assert tbl.num_rows == 3
+    assert "_dc_owner" in tbl.schema.names
+    by_name = {r["name"]: r for r in tbl.to_pylist()}
+    # pre-protection rows: the label columns discovered after their segment
+    # promote to null — the incremental mirror never rewrites mirrored rows.
+    assert by_name["w1-a"]["_dc_owner"] is None
+    assert by_name["w1-b"]["_dc_read_floor"] is None
+    # the born-protected row carries its persisted stamps.
+    assert by_name["w2-new"]["_dc_owner"] == ANNA.uid
+    assert ORG in by_name["w2-new"]["_dc_groups"]
+    reopened.close()
+
+    # 3) a root re-bootstrap is a full copy — snapshot decode applies the R7
+    #    legacy fill, so the pre-protection rows gain honest labels on disk.
+    with store2.snapshot(principal=dc.root_principal(1)) as root_snap:
+        rebuilt = ArrowMirror.bootstrap(tmp_path / "relic.rebuilt", root_snap)
+    r_by_name = {r["name"]: r for r in rebuilt.table(Relic2).to_pylist()}
+    assert len(r_by_name) == 3
+    assert r_by_name["w1-a"]["_dc_owner"] == 0                   # R7: nobody
+    assert list(r_by_name["w1-a"]["_dc_groups"]) == [dc.WORLD]   # read-as-before
+    assert r_by_name["w1-a"]["_dc_read_floor"] == dc.VIEWER
+    assert r_by_name["w1-a"]["_dc_write_floor"] == dc.ADMIN      # fenced at the top
+    assert r_by_name["w2-new"]["_dc_owner"] == ANNA.uid          # persisted stamp
+    rebuilt.close()
+
+    # 4) mirroring protected data demands the audited root — a non-root
+    #    bootstrap over the now-protected class fails closed, writing nothing.
+    dest = tmp_path / "relic.denied"
+    with store2.snapshot(principal=ANNA) as anna_snap:
+        with pytest.raises(dc.ReadDeniedError):
+            ArrowMirror.bootstrap(dest, anna_snap)
+    assert not dest.exists()                                     # nothing wiped/written
+    store2.close()
+
+
 # -- compaction + fold ---------------------------------------------------------------
 
 
