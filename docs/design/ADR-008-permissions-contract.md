@@ -42,8 +42,8 @@ overwrite a curated record", even one it created):
 ```python
 def level(p: Principal, g: int) -> int:
     # the implicit world membership, made normative: every principal holds
-    # at least VIEWER in PUBLIC, even Principal(uid=0, memberships={})
-    return p.memberships.get(g, VIEWER if g == PUBLIC else NO_STANDING)
+    # at least VIEWER in WORLD, even Principal(uid=0, memberships={})
+    return p.memberships.get(g, VIEWER if g == WORLD else NO_STANDING)
 
 def authority_towards(p: Principal, rec) -> int:
     """Highest level p holds in any group rec is shared with; owners act
@@ -65,7 +65,7 @@ def can_write(p, rec) -> bool:              # content AND permission changes
     return authority_towards(p, rec) >= rec._dc_write_floor
 ```
 
-`PUBLIC = 0` is the world group; higher standing in PUBLIC is an explicit,
+`WORLD = 0` is the world group; higher standing in WORLD is an explicit,
 deliberate grant (see R7, R9). Unprotected classes bypass all of this at zero
 cost — the fence exists only where the flag is set (invariant: the unprotected
 commit and read paths do no gate work; enforced by a structural fitness gate,
@@ -83,6 +83,20 @@ W2-9).
   delta; `actor=0` is the anonymous principal. Digest excludes the stamps.
 - **R5 · Clock = private test seam** (`Store._clock`); promotable to a public
   parameter later, additively.
+
+*Amendment 2026-07-15 (W3 review — world-group rename): the world-group
+constant `PUBLIC` is renamed **`WORLD`** (same id `0`, same semantics). In the
+`{group: level}` membership map, `PUBLIC`'s "grant-to-the-public" connotation
+pulls the root sentinel `{PUBLIC: EXECUTIVE}` toward the wrong reading;
+`WORLD` (the Unix "world-readable" sense) reads as scope, so both of its senses
+— "executive *in* the world group" and "executive *over* the world" — land on
+the truth (root), while `share(rec, WORLD, read=VIEWER)` stays the natural
+spelling of "make it public." `EVERYONE`/`ALL` were rejected: they intensify
+the grantee misread ("everyone is executive"). This supersedes R3's `PUBLIC`
+name only — the ladder/group constants still ship flat as `dc.*` names. Cheap
+because the constant is unreleased (merged to main, in no tag, no external
+caller); complements the `dc.root_principal()` sugar (R9 amendment), which
+removes the literal from the dangerous site regardless.*
 
 ## Rulings — batch 2 (2026-07-13)
 
@@ -115,11 +129,11 @@ accident (consistent with R16's interim federation stance).
 
 **Ruled:** when `protected=True` retrofits a class whose store already holds
 records (new lineage cid — invariant 8, old records never rewritten), legacy
-records fill as `owner = 0` (nobody), `groups = {PUBLIC}`, `read_floor =
+records fill as `owner = 0` (nobody), `groups = {WORLD}`, `read_floor =
 VIEWER`, `write_floor = ADMIN`. Consequence: **reads keep working exactly as
-before protection** (implicit `{PUBLIC: VIEWER}`) — no data vanishes on
+before protection** (implicit `{WORLD: VIEWER}`) — no data vanishes on
 upgrade; **writes are fenced at the top** — only a principal explicitly
-holding `ADMIN`+ in PUBLIC (a store-wide administrator) can touch legacy
+holding `ADMIN`+ in WORLD (a store-wide administrator) can touch legacy
 records until someone relabels them. Declined alternatives:
 retrofitter-owns-everything (mass-attributes false provenance into the audit
 trail) and born-dark (a data black hole needing an escape hatch anyway). The
@@ -170,9 +184,9 @@ birth stamp is unaffected (a new record's owner is the acting principal by
 construction). No transfer verb exists — ownership moves only via root until
 one is designed (additive, later).*
 
-### R9 · Break-glass: EXECUTIVE in PUBLIC = the audited root
+### R9 · Break-glass: EXECUTIVE in WORLD = the audited root
 
-**Ruled:** a principal holding `EXECUTIVE` explicitly in the PUBLIC group is
+**Ruled:** a principal holding `EXECUTIVE` explicitly in the WORLD group is
 **store root**: every permission check passes unconditionally — the owner
 clause, both floors, *and the R8 ceiling* — on every record, including
 owner-only records (`groups = ∅`), which are otherwise reachable by no one
@@ -188,17 +202,20 @@ or syncs the registry), consistent with authenticate-outside. The write gate
 (W2-5) and the readable-set compiler (W3-1) special-case exactly this one
 rule; nothing else in the ladder has bypass semantics.
 
-*Amendment 2026-07-15 (W3 review — legibility sugar): the `{PUBLIC: EXECUTIVE}`
-literal misreads as "grant the public executive rights" (`PUBLIC` names the
-world GROUP, `EXECUTIVE` the LEVEL), a real footgun in security-review diffs
-where the frequent legitimate case is `share(rec, PUBLIC, read=VIEWER)`. A
-constructor `dc.root_principal(uid, memberships=...)` is added that returns a
-`Principal` carrying exactly the sentinel (extra memberships merge; `PUBLIC:
-EXECUTIVE` wins). It is sugar over the membership property — no new mode, flag,
-or bypass path, and `is_root` is unchanged — so R9's "root introduces no new
-API surface" is preserved in spirit: the surface R9 forbids is a root
-mode/method, not a named constructor. The literal stays valid; the docs lead
-with the factory.*
+*Amendment 2026-07-15 (W3 review — legibility sugar): a bare `{group: LEVEL}`
+membership literal is directionally ambiguous — is `group` the grantee, or the
+compartment the principal is a member of? — so `Principal(uid, {WORLD:
+EXECUTIVE})` can misread as "hand the world executive rights," a footgun in
+security-review diffs where the frequent legitimate case is `share(rec, WORLD,
+read=VIEWER)`. Two companion fixes: (1) the world-group constant is renamed
+`PUBLIC → WORLD` (see the R3 amendment), whose scope sense leans toward the
+truth; (2) a constructor `dc.root_principal(uid, memberships=...)` returns a
+`Principal` carrying exactly the sentinel (extra memberships merge; `WORLD:
+EXECUTIVE` wins), naming the intent at the call site. The constructor is sugar
+over the membership property — no new mode, flag, or bypass path, and `is_root`
+is unchanged — so R9's "root introduces no new API surface" is preserved in
+spirit: the surface R9 forbids is a root mode/method, not a named constructor.
+The literal stays valid; the docs lead with the factory.*
 
 ### R10 · The write-denial error is `WriteDeniedError`
 
@@ -220,7 +237,7 @@ optional form is what the study's own maker–checker example uses). The rule
 is class-level, deliberately not label-level: the decorator rules on types,
 and it makes deref the single read checkpoint — hydration plans, eager graph
 materialization, and the identity map stay principal-free. Record-level
-generosity is unaffected: a record shared to `PUBLIC` at `VIEWER` is
+generosity is unaffected: a record shared to `WORLD` at `VIEWER` is
 world-readable *through* the Lazy deref.
 
 ### R12 · Ancillary read surfaces fail closed — filtering, never erroring

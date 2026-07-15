@@ -2,7 +2,7 @@
 
 Every buffered protected write — content, label change, delete — clears the
 record's CURRENT persisted write floor; changed floors clear the R8 ceiling;
-root (EXECUTIVE in PUBLIC) is the one bypass and still stamps. Denial =
+root (EXECUTIVE in WORLD) is the one bypass and still stamps. Denial =
 WriteDeniedError strictly before the TID: gapless sequence, buffers intact.
 """
 # pyright: reportAttributeAccessIssue=false, reportCallIssue=false
@@ -23,9 +23,9 @@ OWNER_STAFF = dc.Principal(uid=2, memberships={TEAM: dc.STAFF})
 CURATOR = dc.Principal(uid=4, memberships={TEAM: dc.CURATOR})
 AGENT_900 = dc.Principal(uid=900, memberships={TEAM: dc.AGENT})
 OUTSIDER = dc.Principal(uid=7, memberships={ORG: dc.EXECUTIVE})  # exec, wrong group
-STORE_ADMIN = dc.Principal(uid=8, memberships={dc.PUBLIC: dc.ADMIN})
-ROOT = dc.Principal(uid=99, memberships={dc.PUBLIC: dc.EXECUTIVE})
-FAKE_ROOT = dc.Principal(uid=0, memberships={dc.PUBLIC: dc.EXECUTIVE})  # R7a
+STORE_ADMIN = dc.Principal(uid=8, memberships={dc.WORLD: dc.ADMIN})
+ROOT = dc.Principal(uid=99, memberships={dc.WORLD: dc.EXECUTIVE})
+FAKE_ROOT = dc.Principal(uid=0, memberships={dc.WORLD: dc.EXECUTIVE})  # R7a
 
 
 @dc.entity(protected=True)
@@ -126,12 +126,12 @@ class TestLegacyGating:
             "__annotations__": dict(annotations)}), protected=True)
         s2 = store_factory()
         row = s2.get(V2, tag="w1-row")
-        with s2.acting_as(CURATOR):                    # high, but not ADMIN-in-PUBLIC
+        with s2.acting_as(CURATOR):                    # high, but not ADMIN-in-WORLD
             row.tag = "renamed"
             with pytest.raises(dc.WriteDeniedError):
                 s2.commit()
             s2.discard()
-        with s2.acting_as(STORE_ADMIN):                # ADMIN held in PUBLIC (R7)
+        with s2.acting_as(STORE_ADMIN):                # ADMIN held in WORLD (R7)
             row2 = s2.get(V2, tag="w1-row")
             row2.tag = "renamed"
             s2.commit()
@@ -382,11 +382,11 @@ class TestRoot:
             store.discard()
 
     def test_root_principal_factory_matches_the_sentinel(self, store):
-        # dc.root_principal is legible sugar over {PUBLIC: EXECUTIVE} — same
+        # dc.root_principal is legible sugar over {WORLD: EXECUTIVE} — same
         # object, same break-glass behavior, and extra hats merge in.
         assert dc.root_principal(uid=99) == ROOT
         merged = dc.root_principal(uid=99, memberships={TEAM: dc.STAFF})
-        assert merged.memberships == {TEAM: dc.STAFF, dc.PUBLIC: dc.EXECUTIVE}
+        assert merged.memberships == {TEAM: dc.STAFF, dc.WORLD: dc.EXECUTIVE}
         with store.acting_as(dc.root_principal(uid=99)):
             c = Contact(name="via-factory")            # owner-only, reachable by root
             store.store(c)

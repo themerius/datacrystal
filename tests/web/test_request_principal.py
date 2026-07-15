@@ -36,7 +36,7 @@ from tests.conftest import Mineral
 _MINERAL = f"{Mineral.__module__}:{Mineral.__qualname__}"
 
 TEAM = 2
-OPERATOR = dc.Principal(uid=1, memberships={dc.PUBLIC: dc.ADMIN})
+OPERATOR = dc.Principal(uid=1, memberships={dc.WORLD: dc.ADMIN})
 ANNA = dc.Principal(uid=41, memberships={TEAM: dc.STAFF})
 BEA = dc.Principal(uid=42, memberships={TEAM: dc.CURATOR})
 

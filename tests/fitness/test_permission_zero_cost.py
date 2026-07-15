@@ -16,7 +16,7 @@ import pytest
 import datacrystal as dc
 from datacrystal._storage.memory import MemoryBackend
 
-OWNER = dc.Principal(uid=5, memberships={dc.PUBLIC: dc.CURATOR})
+OWNER = dc.Principal(uid=5, memberships={dc.WORLD: dc.CURATOR})
 
 
 @dc.entity

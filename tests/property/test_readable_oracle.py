@@ -39,11 +39,11 @@ from datacrystal._indexes import readable_bitmap
 from datacrystal._permissions import can_read_row
 from datacrystal._storage.memory import MemoryBackend
 
-ROOT = dc.Principal(uid=1, memberships={dc.PUBLIC: dc.EXECUTIVE})
+ROOT = dc.Principal(uid=1, memberships={dc.WORLD: dc.EXECUTIVE})
 REQUIRED = object()
 
 UIDS = [2, 3, 4, 5]
-GROUPS = [dc.PUBLIC, 7, 8, 9]
+GROUPS = [dc.WORLD, 7, 8, 9]
 LADDER = [dc.VIEWER, dc.AGENT, dc.AUTOMATION, dc.STAFF, dc.CURATOR, dc.ADMIN, dc.EXECUTIVE]
 
 
@@ -71,7 +71,7 @@ def _rock(*, protected: bool, **fields: tuple[Any, Any]) -> type:
 
 
 def _oracle_level(p: dc.Principal, g: int) -> int:
-    return p.memberships.get(g, dc.VIEWER if g == dc.PUBLIC else dc.NO_STANDING)
+    return p.memberships.get(g, dc.VIEWER if g == dc.WORLD else dc.NO_STANDING)
 
 
 def _oracle_is_owner(p: dc.Principal, owner: int) -> bool:
@@ -86,7 +86,7 @@ def _oracle_authority_towards(p: dc.Principal, owner: int, groups: list[int]) ->
 
 
 def _oracle_is_root(p: dc.Principal) -> bool:
-    return p.uid != 0 and p.memberships.get(dc.PUBLIC, dc.VIEWER) >= dc.EXECUTIVE
+    return p.uid != 0 and p.memberships.get(dc.WORLD, dc.VIEWER) >= dc.EXECUTIVE
 
 
 def _oracle_can_read(p: dc.Principal, owner: int, groups: list[int], read_floor: int) -> bool:
@@ -113,7 +113,7 @@ def _principal(draw: Any) -> dc.Principal:
         return dc.Principal(uid=0, memberships={})
     uid = draw(st.sampled_from(UIDS))
     if kind == "root":
-        return dc.Principal(uid=uid, memberships={dc.PUBLIC: dc.EXECUTIVE})
+        return dc.Principal(uid=uid, memberships={dc.WORLD: dc.EXECUTIVE})
     if kind == "uid_only":
         return dc.Principal(uid=uid, memberships={})
     if kind == "single":
@@ -155,7 +155,7 @@ def test_readable_bitmap_can_read_row_and_literal_oracle_agree(n_legacy, labeled
         assert rec is not None
         oid = oid_of(rec)
         assert oid is not None
-        oracle[oid] = (0, [dc.PUBLIC], dc.VIEWER)  # ADR-008 R7, hardcoded independently
+        oracle[oid] = (0, [dc.WORLD], dc.VIEWER)  # ADR-008 R7, hardcoded independently
 
     with s.acting_as(ROOT):
         for i, row in enumerate(labeled):
@@ -178,7 +178,7 @@ def test_readable_bitmap_can_read_row_and_literal_oracle_agree(n_legacy, labeled
     # when hypothesis happens to draw them).
     all_principals = [
         dc.Principal(uid=0, memberships={}),
-        dc.Principal(uid=999, memberships={dc.PUBLIC: dc.EXECUTIVE}),
+        dc.Principal(uid=999, memberships={dc.WORLD: dc.EXECUTIVE}),
         *principals,
     ]
     for owner, _groups, _floor in oracle.values():
@@ -228,9 +228,9 @@ def test_committed_labels_matches_prior_labels_after_index_cache_reopen(tmp_path
     with s1.acting_as(ROOT):
         for i, (owner, groups, floor) in enumerate([
             (0, [], dc.VIEWER),
-            (2, [dc.PUBLIC], dc.AGENT),
+            (2, [dc.WORLD], dc.AGENT),
             (3, [7, 8], dc.CURATOR),
-            (0, [dc.PUBLIC, 9], dc.EXECUTIVE),
+            (0, [dc.WORLD, 9], dc.EXECUTIVE),
         ]):
             rec = Rock(name=f"r{i}")
             oid = s1.store(rec)

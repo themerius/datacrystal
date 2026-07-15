@@ -137,7 +137,7 @@ class TestRaisingPathsStageNothing:
             store.commit()
         before = _labels(n)
         for attempt in (lambda: dc.share(n, TEAM, read=dc.VIEWER, write=dc.AGENT),
-                        lambda: dc.unshare(n, dc.PUBLIC),
+                        lambda: dc.unshare(n, dc.WORLD),
                         lambda: dc.protect(n, write=dc.ADMIN)):
             with pytest.raises(FrozenEntityError, match="fixed at registration"):
                 attempt()

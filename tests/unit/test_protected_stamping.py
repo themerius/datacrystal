@@ -178,7 +178,7 @@ class TestLegacyFill:
         s = store_factory()
         row = s.get(V2, name="w1-era")
         assert row._dc_owner == 0                      # nobody (R7a: matches no session)
-        assert list(row._dc_groups) == [dc.PUBLIC]     # read-as-before
+        assert list(row._dc_groups) == [dc.WORLD]     # read-as-before
         assert row._dc_read_floor == dc.VIEWER
         assert row._dc_write_floor == dc.ADMIN         # writes fenced at the top
         # decode-level reads (no entity construction) agree:
@@ -194,7 +194,7 @@ class TestLegacyFill:
         s = store_factory()
         [view] = s.snapshot().query(dc.fields(V2).name == "w1-era")
         assert view._dc_owner == 0
-        assert tuple(view._dc_groups) == (dc.PUBLIC,)
+        assert tuple(view._dc_groups) == (dc.WORLD,)
         assert view._dc_write_floor == dc.ADMIN        # a miss here = web readers see
         s.close()                                      # different labels than live
 
@@ -241,7 +241,7 @@ class TestLegacyFill:
         with s.acting_as(ANNA):                        # CURATOR < the R7 ADMIN floor
             with pytest.raises(dc.WriteDeniedError):
                 s.migrate()                            # W2-6: migrate rides the gate
-        with s.acting_as(dc.Principal(uid=9, memberships={dc.PUBLIC: dc.ADMIN})):
+        with s.acting_as(dc.Principal(uid=9, memberships={dc.WORLD: dc.ADMIN})):
             assert s.migrate() == 1                    # store-wide admin clears R7
         s.close()
         s2 = store_factory()
@@ -250,7 +250,7 @@ class TestLegacyFill:
         # migrate that rewrote through the R6 dataclass defaults would have
         # PERSISTED write_floor=VIEWER — world-writable legacy, R7 inverted.
         assert row._dc_write_floor == dc.ADMIN
-        assert list(row._dc_groups) == [dc.PUBLIC]
+        assert list(row._dc_groups) == [dc.WORLD]
         s2.close()
 
 
@@ -292,7 +292,7 @@ class TestActorFlip:
         anna = s2.get(dc.Actor, uid=2)
         assert type_info(dc.Actor).protected is True
         assert anna._dc_write_floor == dc.ADMIN        # R7: fenced at the top
-        assert list(anna._dc_groups) == [dc.PUBLIC]    # readable as before
+        assert list(anna._dc_groups) == [dc.WORLD]    # readable as before
         with s2.acting_as(2):                          # registry resolution untouched
             assert s2.principal.uid == 2
             assert s2.principal.memberships == {ORG: dc.CURATOR}

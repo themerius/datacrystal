@@ -24,7 +24,7 @@ from datacrystal._entity import oid_of, type_info
 TEAM = 5
 OWNER = dc.Principal(uid=2, memberships={TEAM: dc.CURATOR})
 OUTSIDER = dc.Principal(uid=9, memberships={TEAM: dc.CURATOR})
-ROOT = dc.Principal(uid=99, memberships={dc.PUBLIC: dc.EXECUTIVE})
+ROOT = dc.Principal(uid=99, memberships={dc.WORLD: dc.EXECUTIVE})
 
 
 @dc.entity(protected=True)
