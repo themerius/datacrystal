@@ -1627,6 +1627,17 @@ class Store:
                          f"authority towards it is {held} (the floor binds "
                          "everyone, including the owner — the curation "
                          "guarantee)")
+                if obj._dc_owner != prior[0]:
+                    # Ownership is immutable after birth: only root (R9, which
+                    # already short-circuited above) may reassign it. Without
+                    # this, any writer who clears the current write floor could
+                    # stage itself as owner and (a) gain a permanent owner-read
+                    # bypass and (b) mint its personal-best level into the R8
+                    # ceiling below (which reads the STAGED owner) — a chown is
+                    # not a mint for authority (ADR-008 R8, amendment 2026-07-15).
+                    deny(f"cannot change owner of {ti.cls.__name__} oid={oid} "
+                         f"from {prior[0]} to {obj._dc_owner}: ownership is "
+                         "immutable after birth — only root may reassign it (R9)")
                 base = prior
             staged_groups = list(obj._dc_groups)
             ceiling = authority_towards(p, obj._dc_owner, staged_groups)

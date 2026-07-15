@@ -204,6 +204,78 @@ class TestCeiling:
             store.commit()
 
 
+class TestOwnershipImmutable:
+    """Ownership is immutable after birth — only root may reassign it (ADR-008
+    R8 amendment 2026-07-15). Without this, any writer who clears a record's
+    CURRENT write floor could stage itself as owner and gain both a permanent
+    owner-read bypass and its personal-best level as the R8 ceiling (which
+    reads the staged owner). A chown is not a mint for authority."""
+
+    def test_writer_cannot_seize_ownership(self, store):
+        # AGENT_900 legitimately clears the write=AGENT floor, then tries to
+        # stage itself as owner WITHOUT touching the floors — only the owner
+        # change should trip the gate.
+        with store.acting_as(OWNER_STAFF):
+            c = Contact(name="seize-me")
+            store.store(c)
+            dc.share(c, TEAM, read=dc.VIEWER, write=dc.AGENT)   # AGENT_900 can write
+            store.commit()
+        with store.acting_as(AGENT_900):
+            c.dc_permissions = dc.Permissions(
+                owner=AGENT_900.uid, groups=(TEAM,),
+                read_floor=dc.VIEWER, write_floor=dc.AGENT,     # floors unchanged
+            )
+            with pytest.raises(dc.WriteDeniedError, match="ownership is immutable"):
+                store.commit()
+            store.discard()
+        with store.acting_as(OWNER_STAFF):
+            assert store.get(Contact, name="seize-me")._dc_owner == OWNER_STAFF.uid
+
+    def test_direct_owner_field_poke_is_gated_too(self, store):
+        # The setattr path (rec._dc_owner = ...) must be gated identically to
+        # the dc_permissions inheritance setter.
+        with store.acting_as(OWNER_STAFF):
+            c = Contact(name="poke-me")
+            store.store(c)
+            dc.share(c, TEAM, read=dc.VIEWER, write=dc.AGENT)
+            store.commit()
+        with store.acting_as(AGENT_900):
+            c._dc_owner = AGENT_900.uid
+            with pytest.raises(dc.WriteDeniedError, match="ownership is immutable"):
+                store.commit()
+            store.discard()
+
+    def test_root_may_reassign_ownership(self, store):
+        # Break-glass chown (offboarding / orphan re-home) — root short-circuits
+        # the whole gate, so it CAN move ownership, and the move is stamped.
+        with store.acting_as(OWNER_STAFF):
+            c = Contact(name="handover")
+            store.store(c)
+            store.commit()
+        with store.acting_as(ROOT):
+            c.dc_permissions = dc.Permissions(
+                owner=CURATOR.uid, groups=(TEAM,),
+                read_floor=dc.VIEWER, write_floor=dc.STAFF,
+            )
+            store.commit()
+            assert store.get(Contact, name="handover")._dc_owner == CURATOR.uid
+
+    def test_same_owner_relabel_is_not_a_chown(self, store):
+        # A dc_permissions reassignment that KEEPS the owner is a normal
+        # re-share, not a chown — the guard must not false-positive on it.
+        with store.acting_as(OWNER_STAFF):
+            c = Contact(name="relabel")
+            store.store(c)
+            dc.share(c, TEAM, read=dc.VIEWER, write=dc.STAFF)
+            store.commit()
+            c.dc_permissions = dc.Permissions(
+                owner=OWNER_STAFF.uid, groups=(TEAM,),
+                read_floor=dc.VIEWER, write_floor=dc.STAFF,
+            )
+            store.commit()                                      # no raise
+            assert store.get(Contact, name="relabel")._dc_owner == OWNER_STAFF.uid
+
+
 class TestInheritanceBaseline:
     """The gate baseline for a NEW record is its birth/inherited labels, not
     empty (review fix): inheritance is the library's policy — the container
@@ -308,6 +380,18 @@ class TestRoot:
             with pytest.raises(dc.WriteDeniedError):
                 store.commit()
             store.discard()
+
+    def test_root_principal_factory_matches_the_sentinel(self, store):
+        # dc.root_principal is legible sugar over {PUBLIC: EXECUTIVE} — same
+        # object, same break-glass behavior, and extra hats merge in.
+        assert dc.root_principal(uid=99) == ROOT
+        merged = dc.root_principal(uid=99, memberships={TEAM: dc.STAFF})
+        assert merged.memberships == {TEAM: dc.STAFF, dc.PUBLIC: dc.EXECUTIVE}
+        with store.acting_as(dc.root_principal(uid=99)):
+            c = Contact(name="via-factory")            # owner-only, reachable by root
+            store.store(c)
+            store.commit()
+            assert store.get(Contact, name="via-factory") is not None
 
 
 class TestDenialMechanics:

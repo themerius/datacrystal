@@ -153,6 +153,23 @@ record's **current** write floor like any other write; and "whoever clears
 the current floor may lower it again" — lowering is bounded by the same two
 checks, no third rule. Both checks run in the same commit gate.
 
+*Amendment 2026-07-15 (W3 review — ownership immutability, security fix): the
+R8 ceiling is `authority_towards(p, rec)`, which includes the owner's
+personal-best boost and reads the **staged** owner. The original ruling never
+pinned `_dc_owner`, so a writer who cleared a record's CURRENT write floor
+could stage itself as the new owner and thereby (a) gain a permanent
+owner-read bypass (the `can_read` owner clause) and (b) have the ceiling
+recomputed against the FORGED owner — laundering its personal-best level, held
+in any unrelated group, into that record's floors (a full ownership takeover +
+owner lock-out; repro'd against W3). **Ruled: `_dc_owner` is immutable after
+birth.** On a persisted protected record the commit gate refuses any write
+whose staged owner differs from the persisted owner (`WriteDeniedError`),
+before the ceiling check. Root (R9) already short-circuits the gate, so
+break-glass chown (offboarding, orphan re-home) still works and is stamped; a
+birth stamp is unaffected (a new record's owner is the acting principal by
+construction). No transfer verb exists — ownership moves only via root until
+one is designed (additive, later).*
+
 ### R9 · Break-glass: EXECUTIVE in PUBLIC = the audited root
 
 **Ruled:** a principal holding `EXECUTIVE` explicitly in the PUBLIC group is
@@ -170,6 +187,18 @@ silent. Root assignment is app-side trust (whoever constructs the Principal
 or syncs the registry), consistent with authenticate-outside. The write gate
 (W2-5) and the readable-set compiler (W3-1) special-case exactly this one
 rule; nothing else in the ladder has bypass semantics.
+
+*Amendment 2026-07-15 (W3 review — legibility sugar): the `{PUBLIC: EXECUTIVE}`
+literal misreads as "grant the public executive rights" (`PUBLIC` names the
+world GROUP, `EXECUTIVE` the LEVEL), a real footgun in security-review diffs
+where the frequent legitimate case is `share(rec, PUBLIC, read=VIEWER)`. A
+constructor `dc.root_principal(uid, memberships=...)` is added that returns a
+`Principal` carrying exactly the sentinel (extra memberships merge; `PUBLIC:
+EXECUTIVE` wins). It is sugar over the membership property — no new mode, flag,
+or bypass path, and `is_root` is unchanged — so R9's "root introduces no new
+API surface" is preserved in spirit: the surface R9 forbids is a root
+mode/method, not a named constructor. The literal stays valid; the docs lead
+with the factory.*
 
 ### R10 · The write-denial error is `WriteDeniedError`
 

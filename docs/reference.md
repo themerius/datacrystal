@@ -804,7 +804,11 @@ class Contact:
   re-commit. Denial is deterministic — `committing()` never retries it.
 - **Break-glass**: a principal holding `EXECUTIVE` in the `PUBLIC` group is
   store **root** — every check passes, including on owner-only records
-  (orphan rescue, offboarding). No new API: root is a property of the
+  (orphan rescue, offboarding). Build it with `dc.root_principal(uid=99)`
+  (legible sugar returning `Principal(uid=99, memberships={dc.PUBLIC:
+  dc.EXECUTIVE})`; extra `memberships=` hats merge in) — `PUBLIC` names the
+  world *group* and `EXECUTIVE` the *level*, so this is out-ranking the world
+  group, **not** a grant to the public. No new API: root is a property of the
   principal's memberships, and every root commit is stamped in the delta log —
   bypass is visible, never silent. `migrate()` rides the gate too (legacy
   records carry the `ADMIN` floor — run migrations as a store-wide admin or
