@@ -222,6 +222,21 @@ class WriteDeniedError(DataCrystalError):
     """
 
 
+class ReadDeniedError(DataCrystalError):
+    """Redacted data was USED (ADR-008 R14): a data-field read on a
+    ``dc.Redacted`` twin, or an attempt to mutate/commit one.
+
+    Traversal never raises this — deref of a denied-but-existing protected
+    record returns the twin gracefully (R14 variant (a): the redacted-twin
+    default, no flag); this fires only when the redacted data is actually
+    *used* — a data-field (or ``dc_permissions``) read, or any write
+    entrypoint, since a twin is never committable. The message carries only
+    the typename — never a title or value, which would themselves leak.
+    Distinguish from :class:`DanglingRefError`: denied-but-existing (this)
+    vs no-record-at-all (that).
+    """
+
+
 class ConsumerDetachedWarning(UserWarning):
     """An attached delta consumer raised during delivery and was detached.
 

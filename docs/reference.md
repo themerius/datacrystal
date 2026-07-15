@@ -792,9 +792,34 @@ class Contact:
   bypass is visible, never silent. `migrate()` rides the gate too (legacy
   records carry the `ADMIN` floor — run migrations as a store-wide admin or
   root); `verify()` is read-only and never gated.
-- Honesty note: **read floors are carried but not yet enforced** — reads do
-  not filter by principal in this release; the read fence is
-  `[planned — Permissions W3/W4]`.
+- **R11 — protected classes are Lazy-referable only**: an eager reference
+  field targeting a `protected=True` class (`x: Contact`) is a
+  decorator-time `TypeError`; the legal forms are `dc.Lazy[Contact]`,
+  `dc.Lazy[Contact] | None`, and `list[dc.Lazy[Contact]]`. This makes
+  **deref the one read checkpoint** (ADR-008) — hydration and eager graph
+  materialization stay principal-free, since an eager protected edge can
+  never exist in the first place.
+- **Masked deref — `dc.Redacted` (ADR-008 R14 variant (a))**: dereferencing
+  a denied-but-existing protected record (`lazy_ref.get()`) never raises —
+  it returns a frozen, per-principal **redacted twin**:
+  `isinstance(x, TheEntityClass)` and `isinstance(x, dc.Redacted)` both
+  hold, `bool(x)` is `False`, and `x.typename` reads; reading any data
+  field (or `x.dc_permissions`) raises `ReadDeniedError` — traversal is
+  graceful, *using* redacted data is loud, so no silent empty value ever
+  feeds a pipeline. A twin is never committable — `store()`/`mark_dirty()`/
+  `delete()`/`upsert()`/the label verbs all raise `ReadDeniedError` — and it
+  never enters the shared identity registry (a ruled exception to invariant
+  6: twins are per-principal ephemera; a later deref by a principal who CAN
+  read materializes the real, registered instance — same identity as
+  always). `DanglingRefError` still means "no record at all", so the two
+  stay distinguishable.
+- Honesty note: the **deref checkpoint enforces today** — `lazy_ref.get()`
+  returns the real instance, a `dc.Redacted` twin, or raises
+  `DanglingRefError`, and never caches a protected target across an
+  `acting_as()` scope change. **Discovery surfaces filter on top of it**
+  `[planned — Permissions W3-2/W3-3]`: `query`/`query_iter`/`get`/
+  `get_many`/`count`/`pluck`/`incoming` still return everything, unfiltered
+  by read floor, until then.
 
 ## Snapshots
 
@@ -1206,6 +1231,7 @@ Everything derives from `dc.DataCrystalError`:
 | `SponsorRequiredError` | `acting_as(uid)` resolved a non-human actor whose sponsor gate fails — no `sponsor` named, or it doesn't resolve to a registered **human** actor (every technical user names a natural person who answers for it) |
 | `UncommittedActorError` | `acting_as(uid)` resolved an `Actor` row with buffered (uncommitted) changes — identity must be durable before it acts; commit the registry change first |
 | `WriteDeniedError` | a write to a protected record was denied (ADR-008): creating one as the anonymous principal, or — once the W2-5 commit gate lands — a write below the record's write floor / a floor above your own authority. Raised in P1 before the TID (gapless, invariant 5); buffered changes stay intact — `discard()` or fix and retry. Deterministic: `committing()` never retries it |
+| `ReadDeniedError` | redacted data was **used** (ADR-008 R14): a data-field (or `dc_permissions`) read on a `dc.Redacted` twin, or an attempt to mutate/commit one (`store()`/`mark_dirty()`/`delete()`/`upsert()`/the label verbs all raise it on a twin). Traversal — dereferencing a denied-but-existing protected record — never raises this; only *using* the redacted result does. Distinguish from `DanglingRefError`: denied-but-existing vs no-record-at-all |
 | `ConflictError` | a federated `/v1/submit` OCC base token no longer matches the coordinator's current payload — the entity moved since it was read (→ HTTP 409; re-read and retry, never last-writer-wins). Carries `.key`, `.expected_base`, `.actual_base` (the conflict envelope) so a client can drive its re-read; `store.committing()` handles the retry for you |
 | `UnregisteredTypeError` | store has records of a class not imported in this process |
 | `NewerStoreError` | store written by a newer format version |

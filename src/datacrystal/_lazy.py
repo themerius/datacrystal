@@ -35,7 +35,13 @@ class Lazy[T]:
     * ``Lazy.of(entity)`` — wrap a live entity (loaded handle).
     * ``ref.get()`` — return the target, loading it from the store if needed.
       Loading goes through the store and therefore enforces the ADR-001
-      owner-thread contract.
+      owner-thread contract. For a ``protected=True`` target this is also
+      the ADR-008 R14 checkpoint: a denied-but-existing target comes back
+      as a ``dc.Redacted`` twin instead of raising, and a dangling
+      reference still raises ``DanglingRefError`` — the deref is the ONE
+      read checkpoint (R11), so every ``.get()`` on a protected target
+      re-checks the CURRENT acting principal rather than caching across
+      ``acting_as()`` scopes.
     * ``ref.peek()`` — return the target only if already loaded, else ``None``.
 
     A handle that knows its OID and store may be *demoted* (unloaded again)
@@ -105,11 +111,29 @@ class Lazy[T]:
                 raise StoreClosedError(
                     "lazy reference cannot load: its store is closed or gone"
                 )
-            obj = cast(T, store._load_oid(self._oid))
-            self._obj = obj
-            manager = store._lazyman
-            if manager is not None:
-                manager.track(self)
+            # The R14 checkpoint (ADR-008 W3-4): the checked deref returns
+            # the real instance, a dc.Redacted twin (denied but existing),
+            # or raises DanglingRefError — never _load_oid, which stays
+            # principal-free (R11 makes deref the ONE read checkpoint).
+            obj = cast(T, store._load_oid_deref(self._oid))
+            # local import: _entity imports _lazy at module level, so a
+            # module-level import here would cycle (the _state.py/
+            # _permissions.py precedent for engine-lazy imports).
+            from datacrystal._entity import type_info
+
+            # A protected target is NEVER cached on the engine handle — twins
+            # report the real (protected) TypeInfo too, so this exemption
+            # covers both "denied" and "readable" protected outcomes alike:
+            # caching either would pin the FIRST acting principal's result
+            # across every LATER acting_as() scope that derefs this same
+            # handle (the loaded-Lazy leak this story closes). Every deref of
+            # a protected target re-checks; unprotected targets cache exactly
+            # as before (byte-identical cost).
+            if not type_info(obj).protected:
+                self._obj = obj
+                manager = store._lazyman
+                if manager is not None:
+                    manager.track(self)
         elif self._clock is not None:
             self._atime = self._clock()  # refresh idle time for the manager
         return obj
@@ -298,7 +322,11 @@ class LazyReferenceManager:
 
     Owns an injectable ``clock`` (tests never sleep) and a weak set of the
     handles it may demote — only handles that can reload themselves (those
-    with an OID and a store) are ever tracked.
+    with an OID and a store) are ever tracked. A handle whose target is a
+    ``protected=True`` class is never tracked at all (ADR-008 W3-4):
+    :meth:`Lazy.get` never caches a protected target on the handle, so
+    there is nothing resident to demote — the manager's cost stays exactly
+    what it was before permissions existed.
     """
 
     def __init__(self, timeout: float,

@@ -50,8 +50,10 @@ def _vault(*, protected: bool, **fields):
 @dc.entity(protected=True)
 class Drawer:
     label: Annotated[str, dc.Unique]
-    prize: "Gem | None" = None
-    gems: list["Gem"] = dataclasses.field(default_factory=list)
+    # R11 (ADR-008): Gem is protected, so every ref to it — direct, inside a
+    # list, or a bare Lazy handle — must be Lazy; there is no eager form.
+    prize: "dc.Lazy[Gem] | None" = None
+    gems: list["dc.Lazy[Gem]"] = dataclasses.field(default_factory=list)
     lazy_gem: dc.Lazy["Gem"] | None = None
 
 
@@ -63,7 +65,7 @@ class Gem:
 @dc.entity
 class PlainShelf:
     label: Annotated[str, dc.Unique]
-    prize: Gem | None = None
+    prize: "dc.Lazy[Gem] | None" = None  # R11 binds unprotected containers too
 
 
 def _labeled_drawer(store, label: str) -> Drawer:
@@ -79,9 +81,9 @@ class TestOwnerStamping:
     def test_fresh_child_inherits_container_labels_never_owner(self, store):
         with store.acting_as(ANNA):
             d = _labeled_drawer(store, "top")
-            d.prize = Gem(name="amethyst")            # direct eager ref
-            d.gems.append(Gem(name="citrine"))        # inside a list field
-            d.lazy_gem = dc.Lazy.of(Gem(name="opal"))  # behind a Lazy handle
+            d.prize = dc.Lazy.of(Gem(name="amethyst"))            # a Lazy scalar field
+            d.gems.append(dc.Lazy.of(Gem(name="citrine")))        # inside a Lazy list field
+            d.lazy_gem = dc.Lazy.of(Gem(name="opal"))              # another Lazy scalar field
             store.commit()
 
         for name in ("amethyst", "citrine", "opal"):
@@ -93,7 +95,7 @@ class TestOwnerStamping:
 
     def test_child_without_protected_container_keeps_birth_labels(self, store):
         with store.acting_as(ANNA):
-            shelf = PlainShelf(label="loose", prize=Gem(name="quartzite"))
+            shelf = PlainShelf(label="loose", prize=dc.Lazy.of(Gem(name="quartzite")))
             store.store(shelf)
             store.commit()
         gem = store.get(Gem, name="quartzite")
@@ -109,8 +111,8 @@ class TestOwnerStamping:
             second._dc_groups.append(ORG)
             second._dc_write_floor = dc.CURATOR
             shared = Gem(name="shared")
-            first.prize = shared                       # registers via `first` NOW
-            second.prize = shared                      # already registered — no relabel
+            first.prize = dc.Lazy.of(shared)            # registers via `first` NOW
+            second.prize = dc.Lazy.of(shared)           # already registered — no relabel
             store.commit()
         gem = store.get(Gem, name="shared")
         assert gem._dc_write_floor == dc.STAFF         # first container's labels stuck
@@ -120,7 +122,7 @@ class TestOwnerStamping:
             d = _labeled_drawer(store, "late")
             store.commit()
         with store.acting_as(BOB):
-            d.prize = Gem(name="latecomer")            # only P1 discovery sees this
+            d.prize = dc.Lazy.of(Gem(name="latecomer"))  # only P1 discovery sees this
             store.commit()
         gem = store.get(Gem, name="latecomer")
         assert gem._dc_owner == 3                      # the COMMIT-time principal
@@ -138,7 +140,7 @@ class TestAnonymousRefusal:
             shelf = PlainShelf(label="s1")
             store.store(shelf)
             tid_before = store.commit()
-        shelf.prize = Gem(name="smuggled")             # buffered on the dirty shelf
+        shelf.prize = dc.Lazy.of(Gem(name="smuggled"))  # buffered on the dirty shelf
         with pytest.raises(WriteDeniedError, match="anonymous"):
             store.commit()                             # anonymous session
         with store.acting_as(ANNA):
@@ -325,11 +327,11 @@ class TestUpsertShield:
             d = _labeled_drawer(store, "merge-me")
             store.commit()
             probe = Drawer(label="merge-me")
-            probe.prize = Gem(name="new-prize")
+            probe.prize = dc.Lazy.of(Gem(name="new-prize"))
             survivor = store.upsert(probe)
             store.commit()
         assert survivor is d
-        assert d.prize is not None and d.prize.name == "new-prize"   # data merged
+        assert d.prize is not None and d.prize.get().name == "new-prize"   # data merged
         assert d._dc_write_floor == dc.STAFF                          # labels kept
 
     def test_unchanged_reimport_buffers_nothing(self, store):

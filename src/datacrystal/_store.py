@@ -78,6 +78,7 @@ from datacrystal._errors import (
     LeaseLostError,
     NotAnEntityError,
     QueryError,
+    ReadDeniedError,
     SchemaMismatchError,
     SponsorRequiredError,
     StoreClosedError,
@@ -97,9 +98,11 @@ from datacrystal._permissions import (
     PERM_LEGACY_FILLS,
     VIEWER,
     authority_towards,
+    can_read_row,
     is_root,
     level,
 )
+from datacrystal._redacted import Redacted, make_twin
 from datacrystal._index_cache import IndexCache
 from datacrystal._indexes import (
     IndexManager,
@@ -919,6 +922,8 @@ class Store:
 
         Raises:
             NotAnEntityError: ``obj`` is not an ``@entity`` class instance.
+            ReadDeniedError: ``obj`` is a ``dc.Redacted`` twin — a denied
+                deref result is never committable (ADR-008 R14).
             DeletedEntityError: ``obj`` was deleted via ``store.delete()``
                 (OIDs are never reused — create a new entity instead).
             WrongThreadError: called from a thread other than the store's
@@ -929,6 +934,11 @@ class Store:
         if not is_entity(obj):
             raise NotAnEntityError(
                 f"{type(obj).__name__} is not an @entity class instance"
+            )
+        if isinstance(obj, Redacted):
+            raise ReadDeniedError(
+                f"this {type(obj).__name__} is a redacted twin — never "
+                "committable (ADR-008 R14)"
             )
         if state_of(obj) == STATE_DELETED:
             raise DeletedEntityError(
@@ -975,6 +985,8 @@ class Store:
             DataCrystalError: the given instance belongs to a different (or
                 closed) store, or it is the pinned root holder (assign
                 ``store.root`` instead of deleting it).
+            ReadDeniedError: the given instance is a ``dc.Redacted`` twin —
+                a denied deref result is never committable (ADR-008 R14).
             WrongThreadError: called from a thread other than the store's
                 owner (ADR-001).
             StoreClosedError: the store has already been closed.
@@ -1007,6 +1019,11 @@ class Store:
         if not is_entity(obj):
             raise NotAnEntityError(
                 f"{type(obj).__name__} is not an @entity class instance"
+            )
+        if isinstance(obj, Redacted):
+            raise ReadDeniedError(
+                f"this {type(obj).__name__} is a redacted twin — never "
+                "committable (ADR-008 R14)"
             )
         oid = oid_of(obj)
         if oid is None:
@@ -1071,6 +1088,8 @@ class Store:
             UniqueViolationError: ``obj``'s key already belongs to another
                 entity and ``obj`` is itself registered with the store —
                 upsert a fresh (untracked) instance or the canonical one.
+            ReadDeniedError: ``obj`` is a ``dc.Redacted`` twin — a denied
+                deref result is never committable (ADR-008 R14).
             WrongThreadError: called from a thread other than the store's
                 owner (ADR-001).
             StoreClosedError: the store has already been closed.
@@ -1079,6 +1098,11 @@ class Store:
         if not is_entity(obj):
             raise NotAnEntityError(
                 f"{type(obj).__name__} is not an @entity class instance"
+            )
+        if isinstance(obj, Redacted):
+            raise ReadDeniedError(
+                f"this {type(obj).__name__} is a redacted twin — never "
+                "committable (ADR-008 R14)"
             )
         ti = type_info(obj)
         unique_fields = [s.name for s in ti.specs if s.unique]
@@ -2699,6 +2723,17 @@ class Store:
         queue: deque[tuple[Any, Any]] = deque([(obj, None)])
         while queue:
             current, container = queue.popleft()
+            if isinstance(current, Redacted):
+                # ADR-008 R14: a twin has no engine state slot (state_of()
+                # would raise AttributeError) — catch it here, before that
+                # call, whether it arrived as the top-level argument
+                # (store(), the root setter, upsert's fresh-insert path) or
+                # was smuggled into another entity's field and enqueued by
+                # _walk_value's Redacted exemption.
+                raise ReadDeniedError(
+                    f"this {type(current).__name__} is a redacted twin — "
+                    "never committable (ADR-008 R14)"
+                )
             if state_of(current) == STATE_DELETED:
                 raise DeletedEntityError(
                     f"this {type(current).__name__} was deleted via "
@@ -2790,23 +2825,46 @@ class Store:
             self._register_graph(obj, walked)
 
     def _walk_value(self, value: Any, queue: deque[tuple[Any, Any]],
-                    container: Any = None) -> None:
+                    container: Any = None, *, via_lazy: bool = False) -> None:
         if value is None or isinstance(value, (str, float, int, bytes)):
             return  # overwhelmingly the common case: scalars reference nothing
         if is_entity(value):
+            if (not via_lazy and type_info(value).protected
+                    and not isinstance(value, Redacted)):
+                # R11 runtime complement (ADR-008, derived — dated 2026-07-15):
+                # the decorator-time rule (_entity._check_r11_lazy_only) cannot
+                # see an Any-typed field, a bare/unparameterised container, or
+                # store.root — this closes the same rule at the one write
+                # boundary the type system can't reach. With both halves in
+                # place, link()/_materialize_graph can never legally reach an
+                # EAGER protected child, so the read path needs no per-child
+                # check — the single checkpoint is the root of a deref
+                # (Store._load_oid_deref, W3-4). `via_lazy` is the exemption:
+                # a value reached by UNWRAPPING a Lazy[...] handle (below) is
+                # never an eager-ref violation — the field's PERSISTED value
+                # is still the Lazy wrapper; only a DIRECT (non-Lazy) field
+                # value trips this check. A Redacted twin is separately
+                # exempt (it is not an eager-ref violation either) — it is
+                # enqueued as usual and caught by the more specific
+                # never-committable-twin check at the _register_graph loop top.
+                raise TypeError(
+                    f"{type(value).__name__} is protected — protected classes "
+                    "are Lazy-referable only (ADR-008 R11): wrap it in "
+                    "dc.Lazy.of(...) before assigning it"
+                )
             oid = oid_of(value)
             if oid is None or oid in self._new or oid in self._dirty:
                 queue.append((value, container))
         elif isinstance(value, Lazy):
             target = cast("Lazy[Any]", value).peek()
             if target is not None:
-                self._walk_value(target, queue, container)
+                self._walk_value(target, queue, container, via_lazy=True)
         elif isinstance(value, (list, tuple)):
             for item in cast("tuple[Any, ...]", value):
-                self._walk_value(item, queue, container)
+                self._walk_value(item, queue, container, via_lazy=via_lazy)
         elif isinstance(value, dict):
             for item in cast("dict[Any, object]", value).values():
-                self._walk_value(item, queue, container)
+                self._walk_value(item, queue, container, via_lazy=via_lazy)
 
     def _harvest_live_refs(self, obj: Any) -> set[int]:
         """The OIDs ``obj`` references — direct entity refs and Lazy refs, in
@@ -3029,6 +3087,64 @@ class Store:
             return obj
         return self._materialize_graph(oid, cache)
 
+    def _load_oid_deref(self, oid: int,
+                        cache: dict[int, StoredRecord] | None = None) -> Any:
+        """The R14 checkpoint for a DEREF surface (ADR-008 W3-4) — THREE
+        distinguishable outcomes: the real instance (readable), a
+        :class:`~datacrystal._redacted.Redacted` twin (exists, denied), or
+        ``DanglingRefError`` (no record at all). Judges COMMITTED labels
+        only (W3 D1): a staged ``share()``/``protect()`` is unvalidated
+        until the commit gate rules on it, so judging it here would let a
+        principal pre-grant itself visibility before the gate ever ran.
+
+        Unlike :meth:`_load_oid` (which stays principal-free by design —
+        R11 makes deref the ONE read checkpoint, so hydration and eager
+        graph materialization never need to know who is asking), this is
+        called only from deref surfaces: :meth:`~datacrystal._lazy.Lazy.get`
+        today; the ``get_many`` ref-form joins in W3-3.
+
+        A registry hit is checked too, not only the record path — an
+        earlier readable load must never leak the live instance to a later,
+        unreadable principal (the loaded-Lazy-cache landmine this story
+        closes in :meth:`~datacrystal._lazy.Lazy.get`). Either way the
+        registry and the live instance are untouched: a twin is built fresh
+        and never registered, so identity for the readable case is intact.
+        """
+        self._guard()
+        obj = self._registry.get(oid)
+        if obj is not None:
+            ti = type_info(obj)
+            if not ti.protected:
+                return obj
+            p = self.principal
+            if is_root(p):
+                return obj
+            labels = self._index.ensure(ti).committed_labels(oid)
+            if labels is not None:
+                if can_read_row(p, *labels):
+                    return obj
+                return make_twin(ti, oid)
+            # labels is None: an inconsistency for a registered CLEAN/DIRTY
+            # oid — should not happen. Fall through to the record path below
+            # and let ITS check decide: fail closed, never open.
+        rec = cache.get(oid) if cache else None
+        if rec is None:
+            rec = self._backend.load_many([oid]).get(oid)
+        if rec is None:
+            raise DanglingRefError(
+                f"no record for oid {oid} in the store — deleted "
+                "(v0.x deletes are unchecked, ADR-003) or never committed; "
+                "the reference you followed is stale"
+            )
+        ti = self._ti_for_cid(rec.cid)
+        if ti.protected:
+            p = self.principal
+            if not is_root(p):
+                owner, groups, read_floor, _write_floor = self._prior_labels(rec)
+                if not can_read_row(p, owner, groups, read_floor):
+                    return make_twin(ti, oid)  # nothing hydrated, registry untouched
+        return self._materialize_graph(oid, cache if cache is not None else {oid: rec})
+
     def _materialize_graph(self, root_oid: int,
                            cache: dict[int, StoredRecord] | None) -> Any:
         """Materialize ``root_oid`` and the transitive closure of its EAGER
@@ -3134,7 +3250,13 @@ class Store:
         if isinstance(value, RefToken):
             if lazy:
                 existing = self._registry.get(value.oid)
-                if existing is not None:
+                # ADR-008 W3-4: a registry hit is only pre-loadable into the
+                # handle when its target is UNPROTECTED — a loaded handle
+                # embedded in a shared parent is a cross-principal cache
+                # (the same landmine Lazy.get() closes on the read side).
+                # A protected target always builds unloaded, so every future
+                # .get() re-derives through the checked deref.
+                if existing is not None and not type_info(existing).protected:
                     # engine-only Lazy constructors (users use Lazy.of)
                     handle: Lazy[Any] = Lazy[Any]._loaded(  # pyright: ignore[reportPrivateUsage]
                         existing, value.oid, self

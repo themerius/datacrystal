@@ -582,6 +582,7 @@ def _resolve_specs(cls: type, field_names: tuple[str, ...]) -> tuple[FieldSpec, 
         hint = hints.get(name, Any)
         markers: list[_Marker] = []
         core = _strip_annotated(hint, markers)
+        _check_r11_lazy_only(cls, name, core)
         indexed = any(m is Index for m in markers)
         unique = any(m is Unique for m in markers)
         srt = any(m is SortedIndex for m in markers)
@@ -691,6 +692,53 @@ def _contains_lazy(hint: Any) -> bool:
     if origin is Annotated:
         return _contains_lazy(get_args(hint)[0])
     return any(_contains_lazy(a) for a in get_args(hint))
+
+
+def _check_r11_lazy_only(cls: type, field_name: str, hint: Any) -> None:
+    """R11 (ADR-008): a protected class may appear in a field only inside a
+    ``Lazy[...]`` — the legal forms are ``Lazy[X]``, ``Lazy[X] | None``, and
+    ``list[Lazy[X]]``. Any DIRECT (eager) reference to a protected class —
+    a bare field, a union member, or a list/tuple/set/dict element that is
+    not behind ``Lazy`` — is a decorator-time ``TypeError``.
+
+    Structural walk mirroring :func:`_may_hold_entity`, except recursion
+    STOPS at a ``Lazy[...]`` node (the exemption R11 grants) instead of
+    descending into it — this is the rule that makes ``Lazy.get()``/
+    :meth:`~datacrystal._store.Store._load_oid_deref` the ONE read
+    checkpoint (epic #168 W3-4): hydration, eager graph materialization and
+    the identity map stay principal-free because an eager protected edge
+    can never be created in the first place.
+
+    Runs from :func:`_resolve_specs`, so it fires as early as the type hints
+    resolve — at ``@entity`` decoration when possible, or at first
+    persistence via the same ``NameError``-deferred fallback every other
+    per-field validation here already follows (self- and mutually-
+    referencing classes cannot resolve their own forward refs yet).
+    """
+    origin = get_origin(hint)
+    if origin is Annotated:
+        _check_r11_lazy_only(cls, field_name, get_args(hint)[0])
+        return
+    if origin is Lazy or hint is Lazy:
+        return  # the exemption: a protected class behind Lazy is legal
+    if hint in _REF_FREE_LEAVES:
+        return
+    if origin in (list, tuple, set, frozenset, dict):
+        for arg in get_args(hint):
+            if arg is not Ellipsis:
+                _check_r11_lazy_only(cls, field_name, arg)
+        return
+    if _is_union(hint):
+        for arg in get_args(hint):
+            _check_r11_lazy_only(cls, field_name, arg)
+        return
+    if isinstance(hint, EntityMeta) and type_info(hint).protected:
+        raise TypeError(
+            f"{cls.__name__}.{field_name}: {hint.__name__} is protected — "
+            "protected classes are Lazy-referable only (ADR-008 R11); the "
+            f"legal forms are dc.Lazy[{hint.__name__}], "
+            f"dc.Lazy[{hint.__name__}] | None, or list[dc.Lazy[{hint.__name__}]]"
+        )
 
 
 def _is_union(hint: Any) -> bool:
