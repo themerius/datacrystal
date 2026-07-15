@@ -9,11 +9,12 @@ plus a raise-sentinel on the gate's single entry point.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import pytest
 
 import datacrystal as dc
+from datacrystal._entity import oid_of as _oid_of
 from datacrystal._storage.memory import MemoryBackend
 
 OWNER = dc.Principal(uid=5, memberships={dc.WORLD: dc.CURATOR})
@@ -170,4 +171,59 @@ def test_read_fence_never_compiles_for_unprotected_reads(monkeypatch: Any) -> No
         store.explain(FencedRow)
     with pytest.raises(AssertionError, match="readable_bitmap ran"):
         list(store.query_iter(FencedRow))
+    store.close()
+
+
+def test_snapshot_read_fence_never_fires_for_unprotected_reads(monkeypatch: Any) -> None:
+    # Scenario E, snapshot tier (ADR-008 W4/R15): the same raise-sentinel over
+    # datacrystal._snapshot's imported readable_bitmap AND can_read_row (deref
+    # surfaces check the latter). Every snapshot surface guards on ti.protected
+    # first, so an UNPROTECTED query/get/all/count/explain never looks the names
+    # up; a protected control class DOES trip them.
+    import datacrystal._snapshot as _snap_mod
+
+    store, _, plain, fenced = _seeded()
+
+    def boom_rb(*a: Any, **k: Any) -> Any:
+        raise AssertionError("readable_bitmap ran on an unprotected snapshot read")
+
+    def boom_cr(*a: Any, **k: Any) -> Any:
+        raise AssertionError("can_read_row ran on an unprotected snapshot deref")
+
+    monkeypatch.setattr(_snap_mod, "readable_bitmap", boom_rb)
+    monkeypatch.setattr(_snap_mod, "can_read_row", boom_cr)
+
+    with store.snapshot(principal=OWNER) as snap:
+        # unprotected: neither compiler nor predicate may fire on any surface
+        assert len(snap.query(PlainRow)) == len(plain)
+        assert snap.count(PlainRow) == len(plain)
+        assert len(snap.all(PlainRow)) == len(plain)
+        assert snap.explain(PlainRow).extent == len(plain)
+        assert snap.get(cast(int, _oid_of(plain[0]))).tag == plain[0].tag  # deref: no can_read_row
+        assert snap.get_many([cast(int, _oid_of(p)) for p in plain])[0] is not None
+
+        # protected control: discovery trips readable_bitmap; deref trips can_read_row
+        with pytest.raises(AssertionError, match="readable_bitmap ran"):
+            snap.query(FencedRow)
+        with pytest.raises(AssertionError, match="readable_bitmap ran"):
+            snap.count(FencedRow)
+        with pytest.raises(AssertionError, match="readable_bitmap ran"):
+            snap.all(FencedRow)
+        with pytest.raises(AssertionError, match="readable_bitmap ran"):
+            snap.explain(FencedRow)
+        with pytest.raises(AssertionError, match="can_read_row ran"):
+            snap.get(cast(int, _oid_of(fenced[0])))
+    store.close()
+
+
+def test_for_principal_is_o1_over_the_shared_core() -> None:
+    # R15 economics: a sibling handle builds nothing and shares every index /
+    # cache / reverse posting with the origin — the pool stays O(n)/commit, not
+    # O(n)/principal. Proven structurally: the two handles' cores are identical.
+    store, _, _, _ = _seeded()
+    with store.snapshot(principal=OWNER) as a:
+        b = a.for_principal(dc.Principal(uid=7, memberships={dc.WORLD: dc.STAFF}))
+        assert a._core is b._core  # pyright: ignore[reportPrivateUsage]
+        assert a is not b
+        assert b.principal.uid == 7
     store.close()

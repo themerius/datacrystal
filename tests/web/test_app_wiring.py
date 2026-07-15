@@ -305,9 +305,9 @@ def test_read_snapshot_is_pooled_per_watermark(tmp_path) -> None:
         # requests (the one O(n) index build is amortised across every read).
         assert len(seen) == 2
         assert seen[0] is seen[1]
-        assert not seen[0]._closed  # pyright: ignore[reportPrivateUsage]
+        assert not seen[0]._core.closed  # pyright: ignore[reportPrivateUsage]
     # Shutdown closed the pooled snapshot (its WAL read txn released).
-    assert seen[0]._closed  # pyright: ignore[reportPrivateUsage]
+    assert seen[0]._core.closed  # pyright: ignore[reportPrivateUsage]
 
 
 def test_snapshot_pool_refreshes_when_a_commit_advances_the_watermark(tmp_path) -> None:
@@ -333,7 +333,7 @@ def test_snapshot_pool_refreshes_when_a_commit_advances_the_watermark(tmp_path) 
     assert seen[0] is not seen[1]
     assert seen[0].tid < seen[1].tid
     # The superseded snapshot A was retired + closed (no reader still holds it).
-    assert seen[0]._closed  # pyright: ignore[reportPrivateUsage]
+    assert seen[0]._core.closed  # pyright: ignore[reportPrivateUsage]
 
 
 def test_store_lifespan_factory_builds_the_lifespan_cm(tmp_path) -> None:

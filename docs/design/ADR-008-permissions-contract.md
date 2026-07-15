@@ -327,6 +327,8 @@ over the **shared** per-watermark snapshot indexes. The pool's economics are
 untouched — index builds stay O(n) per commit, never O(n) per principal or per
 request.
 
+*Amendment 2026-07-15 (W4 build, derived under R15): the (watermark, principal) pair is realized as a shared per-watermark core (view, caches, indexes — built once per commit) and per-principal `Snapshot` handles over it; `store.snapshot(*, principal=None)` binds the acting principal at creation, and `Snapshot.for_principal(p)` derives a sibling handle over the same core in O(1) (a handle's binding is immutable). Discovery surfaces intersect a lazily-compiled, handle-cached `readable_bitmap`; deref surfaces check `can_read_row` at decode level. Found-but-denied on `get_many` returns the snapshot-tier redacted twin (an `EntityView` that is `isinstance(_, Redacted)`, data-field access raising `ReadDeniedError`) — R14's default carried onto the DTO tier, one denial model across live and snapshot; the strict `get` raises `ReadDeniedError`. A persisted `_dc_*` class with no live entity class fails closed (raise on deref/`all(str)`/`_stream`, filter on `incoming`) for every principal except root; `index_bitmaps()` raises on protected classes (R12). The web pool wiring and the projection of a `Redacted` source to wire-null land in W4-4.*
+
 ### R16 · Deferred out of this campaign (confirmed)
 
 **Ruled:** agent delegation / acting-on-behalf-of (effective rights =

@@ -233,7 +233,7 @@ class BlobHandle:
     """
 
     __slots__ = ("_obj", "_oid", "_size", "_hash", "_storeref",
-                 "_atime", "_clock", "__weakref__")
+                 "_owner_oid", "_atime", "_clock", "__weakref__")
 
     # Mirror Lazy's slot annotations so the manager's duck-typed sweep
     # (_obj / _oid / _atime / _clock) operates on a Blob with no special-casing.
@@ -242,6 +242,11 @@ class BlobHandle:
     _size: int
     _hash: bytes
     _storeref: weakref.ref[Any] | None
+    # The OID of the record that OWNS this blob, but ONLY when that record is
+    # protected (ADR-008 W4-3): a blob is readable iff its owning record is, so
+    # .bytes() re-checks the owner under the CURRENT principal. None for an
+    # unprotected owner — the gate is then structurally skipped (zero cost).
+    _owner_oid: int | None
     _atime: float
     _clock: Callable[[], float] | None
 
@@ -249,9 +254,12 @@ class BlobHandle:
         raise TypeError("dc.Blob handles are created by the engine on hydration")
 
     @classmethod
-    def _bind(cls, blob_oid: int, size: int, hash: bytes, store: Any) -> "BlobHandle":
+    def _bind(cls, blob_oid: int, size: int, hash: bytes, store: Any,
+              owner_oid: int | None = None) -> "BlobHandle":
         """Engine path: a handle for a decoded :class:`BlobToken`, bound to its
         store but with the bytes still on disk (fetched on first ``.bytes()``).
+        ``owner_oid`` is set only for a PROTECTED owning record (ADR-008 W4-3);
+        None leaves the read gate off (unprotected owner, zero cost).
         """
         self = object.__new__(cls)
         self._obj = None
@@ -259,6 +267,7 @@ class BlobHandle:
         self._size = size
         self._hash = hash
         self._storeref = weakref.ref(store)
+        self._owner_oid = owner_oid
         self._atime = 0.0
         self._clock = None
         return self
@@ -292,6 +301,20 @@ class BlobHandle:
         it from the store (CRC checked in the backend); later calls return the
         cached bytes until the manager demotes the handle.
         """
+        # ADR-008 W4-3: a blob is readable only if its owning record is. The
+        # gate runs on EVERY call (before the cache check), not only on the
+        # fetch — a handle cached by a readable principal must not serve its
+        # bytes to a later, unreadable one (the demotable-cache landmine).
+        # _owner_oid is set only for a protected owner, so the unprotected path
+        # skips the gate entirely (zero cost).
+        if self._owner_oid is not None:
+            storeref = self._storeref
+            store = storeref() if storeref is not None else None
+            if store is None:
+                raise StoreClosedError(
+                    "blob handle cannot load: its store is closed or gone"
+                )
+            store._blob_read_gate(self._owner_oid)
         obj = self._obj
         if obj is None:
             storeref = self._storeref
