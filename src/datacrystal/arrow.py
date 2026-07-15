@@ -33,6 +33,20 @@ lineage shapes are filled from the live class's defaults exactly like
 snapshot materialization — so incremental mirroring ≡ bootstrap-from-
 snapshot (fitness #13) — or null when no class is registered.
 
+Protected data on disk (ADR-008 R13 honesty obligation): mirroring a
+``protected=True`` class writes BOTH its ordinary columns and its four
+``_dc_*`` label columns to the parquet segments in **plaintext** — a mirror
+of protected data is protected data (the same obligation the FTS sidecar
+carries, ADR-008 R13). The per-record read fence lives in the engine /
+snapshot tier, NOT here: once a row lands in a segment, anyone who can read
+the parquet directory reads it unfenced. So the full mirror is built as the
+AUDITED ROOT — :meth:`ArrowMirror.bootstrap` requires a **root-bound**
+snapshot for a protected (or persisted ``_dc_*`` label-bearing) type; a
+non-root snapshot's ``_stream`` fails closed (ADR-008 W4-5), exactly as
+``migrate()`` rewrites the whole extent under a privileged principal. Protect
+the mirror directory with filesystem permissions befitting its most-sensitive
+mirrored class, and treat ``compact()``ed parquet as sensitive as the store.
+
 Owner confinement: ``apply()`` runs on the store's owner thread (that is
 where deltas are delivered); call ``table()`` there too and hand the
 returned (immutable) ``pyarrow.Table`` to any thread or engine you like.
@@ -55,7 +69,8 @@ from typing import Any, Callable, Iterable, Mapping, cast
 import msgspec
 
 from datacrystal._entity import TYPES_BY_NAME, type_info
-from datacrystal._errors import DataCrystalError
+from datacrystal._errors import DataCrystalError, ReadDeniedError
+from datacrystal._permissions import PERM_FIELDS, is_root
 from datacrystal._records import (
     DATE_EXT_CODE,
     NAIVE_DATETIME_EXT_CODE,
@@ -469,9 +484,26 @@ class ArrowMirror:
         forces a clean re-bootstrap rather than trusting a partial extent.
         Compaction is suppressed during the stream (≤1 per type, no O(M²)
         thrash).
+
+        Mirroring a ``protected=True`` (or persisted ``_dc_*`` label-bearing)
+        type requires a **root-bound** ``snapshot`` — build it with
+        ``store.snapshot(principal=dc.root_principal(uid))`` (the audited
+        break-glass, R9). The mirror is a full plaintext copy of the extent
+        including the protected columns (see the module docstring's honesty
+        obligation), so it is built under the store root exactly as
+        ``migrate()`` rewrites the whole extent under a privileged principal.
+        A non-root snapshot fails closed here (nothing is wiped or written);
+        its ``_stream`` would refuse mid-scan anyway (ADR-008 W4-5). This is an
+        enforced guard, never a silent privilege elevation — the caller must
+        consciously choose root to mint a plaintext mirror of protected data.
+
+        Raises:
+            ReadDeniedError: the snapshot is not root-bound yet ``snapshot``
+                would mirror a protected / ``_dc_*`` label-bearing type (W4-5).
         """
         if batch < 1:
             raise MirrorConfigError("batch must be >= 1")
+        cls._require_root_for_protected(snapshot, only)
         mirror = cls(path, only=only, flush_every=flush_every,
                      max_segments=max_segments, _wipe=True)
         for cid, typename, fields in snapshot.types:
@@ -491,6 +523,47 @@ class ArrowMirror:
         mirror._watermark = snapshot.tid
         mirror.flush()  # the ONLY flush that stamps the real watermark
         return mirror
+
+    @staticmethod
+    def _require_root_for_protected(
+        snapshot: Any, only: Iterable[type | str] | None
+    ) -> None:
+        """Fail closed BEFORE anything is wiped or written if this bootstrap
+        would mirror a protected (or persisted ``_dc_*`` label-bearing) type
+        but the ``snapshot`` is not root-bound.
+
+        The parquet mirror is a full plaintext copy of the extent — protected
+        columns included (module-docstring honesty obligation) — so it must be
+        minted as the audited store root (``dc.root_principal``), exactly as
+        ``migrate()`` rewrites the whole extent under a privileged principal.
+        A non-root ``snapshot._stream`` would refuse mid-scan anyway (ADR-008
+        W4-5); raising up front means a mistaken non-root call never destroys
+        an existing good mirror (``_wipe``) and never leaves a half-written
+        one. This is enforcement, NOT elevation: bootstrap never re-derives a
+        root handle for the caller — choosing root is the caller's conscious,
+        audited act.
+        """
+        principal = getattr(snapshot, "principal", None)
+        if principal is not None and is_root(principal):
+            return  # audited break-glass: the whole extent streams freely
+        only_names = (
+            None if only is None
+            else {t if isinstance(t, str) else type_info(t).typename for t in only}
+        )
+        for _cid, typename, fields in snapshot.types:
+            if only_names is not None and typename not in only_names:
+                continue
+            ti = TYPES_BY_NAME.get(typename)
+            label_bearing = PERM_FIELDS[0] in fields  # persisted _dc_owner column
+            if (ti is not None and ti.protected) or label_bearing:
+                raise ReadDeniedError(
+                    f"ArrowMirror.bootstrap over protected type {typename!r} "
+                    "needs a root-bound snapshot: the parquet mirror is a full "
+                    "plaintext copy of the extent (protected _dc_* columns and "
+                    "data included), so mint it as the audited store root — "
+                    "store.snapshot(principal=dc.root_principal(uid)). A "
+                    "non-root bootstrap fails closed (ADR-008 W4-5)."
+                )
 
     # -- reads ---------------------------------------------------------------------
 
