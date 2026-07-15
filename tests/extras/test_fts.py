@@ -424,13 +424,19 @@ def test_registry_derived_config_indexes_fulltext_entities(
 ) -> None:
     """The zero-config path: FullTextIndex(path) reads dc.FullText markers
     straight from the @entity registry (declaration lives in code, like
-    dc.Index)."""
+    dc.Index). The registry also carries a protected dc.FullText class (Secret,
+    below), so the zero-config index covers a protected class and search() must
+    be fenced — a root snapshot filters nothing and confirms Gemstone indexed."""
+    from datacrystal._entity import type_info
+
     store = store_factory()
     idx = fresh_index(tmp_path)  # no fulltext= map
     store.attach(idx)
     store.root = [Gemstone(qid="Q1", name="quartz", notes="glänzende Kristalle")]
     store.commit()
-    assert idx.search("Kristall", cls=Gemstone)
+    with store.snapshot(principal=ROOT) as snap:
+        hits = idx.search("Kristall", cls=Gemstone, snapshot=snap)
+        assert [h.typename for h in hits] == [type_info(Gemstone).typename]
     store.close()
     idx.close()
 
@@ -498,3 +504,169 @@ def test_apply_is_o_delta_not_o_corpus(tmp_path) -> None:
     assert counts[0] == counts[1], (
         f"statements per fixed delta grew with corpus size: {counts}"
     )
+
+
+# -- W4-5: FTS post-filter over protected classes (ADR-008 R13) ----------------
+
+from datacrystal._entity import oid_of  # noqa: E402
+
+TEAM = 5
+OWNER = dc.Principal(uid=2, memberships={TEAM: dc.CURATOR})
+MEMBER = dc.Principal(uid=3, memberships={TEAM: dc.AGENT})
+OUTSIDER = dc.Principal(uid=4, memberships={99: dc.CURATOR})
+ROOT = dc.root_principal(1)
+
+
+@dc.entity(protected=True)
+class Secret:
+    label: Annotated[str, dc.Unique]
+    body: Annotated[str | None, dc.FullText(language="en")] = None
+
+
+SECRET_FULLTEXT = {"tests.extras.test_fts:Secret": {"body": "en"}}
+
+
+def _attach_secrets(store, idx) -> tuple[int, int]:
+    """One team-shared secret (member-readable) + one owner-only secret, both
+    matching 'crystal'. Returns (shared_oid, secret_oid)."""
+    store.attach(idx)
+    with store.acting_as(OWNER):
+        shared = Secret(label="shared", body="the crystal lattice diagram")
+        store.store(shared)
+        dc.share(shared, TEAM, read=dc.AGENT, write=dc.CURATOR)
+        secret = Secret(label="secret", body="the crystal vault combination")
+        store.store(secret)
+        store.commit()
+    return oid_of(shared), oid_of(secret)
+
+
+def test_no_snapshot_over_protected_raises(tmp_path) -> None:
+    """Fail-closed backward-compat (R12 doctrine): an index covering a protected
+    class refuses an unfenced search rather than reading with full visibility."""
+    idx = fresh_index(tmp_path, fulltext=SECRET_FULLTEXT)
+    with pytest.raises(dc.ReadDeniedError):
+        idx.search("crystal")  # no snapshot + protected coverage → refused
+    idx.close()
+
+
+def test_no_snapshot_over_unprotected_is_unchanged(store_factory, tmp_path) -> None:
+    """An index covering ONLY unprotected classes stays byte-identical to
+    pre-W4: snapshot=None does not raise and renders snippets from the sidecar."""
+    store = store_factory()
+    idx = fresh_index(tmp_path, fulltext=GEM_FULLTEXT)
+    store.attach(idx)
+    store.root = [Gemstone(qid="Q1", name="quartz", notes="milchige Kristalle")]
+    store.commit()
+    hits = idx.search("Kristall")  # no snapshot, no raise
+    assert [h.oid for h in hits]
+    assert "Kristalle" in (hits[0].snippets.get("notes") or "")
+    store.close()
+    idx.close()
+
+
+def test_post_filter_drops_denied_hits_and_root_sees_all(store_factory,
+                                                         tmp_path) -> None:
+    store = store_factory()
+    idx = fresh_index(tmp_path, fulltext=SECRET_FULLTEXT)
+    shared_oid, secret_oid = _attach_secrets(store, idx)
+    with store.snapshot(principal=MEMBER) as snap:
+        assert {h.oid for h in idx.search("crystal", snapshot=snap)} == {shared_oid}
+    with store.snapshot(principal=OUTSIDER) as snap:
+        assert idx.search("crystal", snapshot=snap) == []   # sees neither
+    with store.snapshot(principal=ROOT) as snap:
+        assert {h.oid for h in idx.search("crystal", snapshot=snap)} == {
+            shared_oid, secret_oid
+        }                                                    # root filters nothing
+    store.close()
+    idx.close()
+
+
+def test_snippets_never_leak_denied_text(store_factory, tmp_path) -> None:
+    """A dropped row's stored plaintext must never reach a SearchHit; a
+    survivor's snippet renders from the snapshot's own view text."""
+    store = store_factory()
+    idx = fresh_index(tmp_path, fulltext=SECRET_FULLTEXT)
+    shared_oid, _secret_oid = _attach_secrets(store, idx)
+    with store.snapshot(principal=MEMBER) as snap:
+        hits = idx.search("crystal", snapshot=snap)
+        assert len(hits) == 1 and hits[0].oid == shared_oid
+        text = " ".join(hits[0].snippets.values())
+        assert "lattice" in text     # survivor's own text is rendered
+        assert "vault" not in text   # the denied row's text never appears
+    store.close()
+    idx.close()
+
+
+def test_over_fetch_fills_to_limit_past_denied_top_hits(store_factory,
+                                                        tmp_path) -> None:
+    """BM25+LIMIT under-returns after filtering: a run of high-ranked DENIED
+    hits must not starve the page — geometric over-fetch widens until the one
+    lower-ranked readable hit fills limit=1."""
+    store = store_factory()
+    idx = fresh_index(tmp_path, fulltext=SECRET_FULLTEXT)
+    store.attach(idx)
+    with store.acting_as(OWNER):
+        # 8 short owner-only docs (just the term ⇒ rank high), all denied to MEMBER
+        for i in range(8):
+            store.store(Secret(label=f"d{i}", body="crystal"))
+        # one readable doc, longer ⇒ ranks BELOW the 8 denied top hits
+        shared = Secret(label="shared",
+                        body="crystal " + " ".join(f"w{j}" for j in range(40)))
+        store.store(shared)
+        dc.share(shared, TEAM, read=dc.AGENT, write=dc.CURATOR)
+        store.commit()
+    shared_oid = oid_of(shared)
+    with store.snapshot(principal=MEMBER) as snap:
+        # initial 4×limit window is entirely denied; over-fetch must widen.
+        hits = idx.search("crystal", snapshot=snap, limit=1)
+        assert [h.oid for h in hits] == [shared_oid]
+    store.close()
+    idx.close()
+
+
+def test_scan_cap_bounds_an_all_denied_search(store_factory, tmp_path) -> None:
+    """An all-denied principal examines at most scan_cap candidates — never a
+    full-table walk."""
+    store = store_factory()
+    idx = fresh_index(tmp_path, fulltext=SECRET_FULLTEXT)
+    store.attach(idx)
+    with store.acting_as(OWNER):
+        for i in range(50):
+            store.store(Secret(label=f"d{i}", body="crystal"))
+        store.commit()
+    with store.snapshot(principal=OUTSIDER) as snap:
+        seen: list[int] = []
+        real = snap.get_many
+
+        def counting(refs):
+            batch = list(refs)
+            seen.extend(batch)
+            return real(batch)
+
+        snap.get_many = counting  # Snapshot is intentionally un-slotted
+        hits = idx.search("crystal", snapshot=snap, scan_cap=10, limit=5)
+        assert hits == []               # outsider reads none of the 50
+        assert 0 < len(seen) <= 10      # bounded by scan_cap, not the 50-row table
+    store.close()
+    idx.close()
+
+
+def test_protected_bootstrap_needs_root(store_factory, tmp_path) -> None:
+    """A mirror bootstrap over a protected class requires a root-bound snapshot
+    (a non-root snapshot would build a silently partial mirror)."""
+    store = store_factory()
+    with store.acting_as(OWNER):
+        store.store(Secret(label="s1", body="crystal one"))
+        store.store(Secret(label="s2", body="crystal vault two"))
+        store.commit()
+    with store.snapshot(principal=OWNER) as snap:
+        with pytest.raises(dc.ReadDeniedError):
+            FullTextIndex.bootstrap(tmp_path / "b.fts", snap, fulltext=SECRET_FULLTEXT)
+    with store.snapshot(principal=ROOT) as snap:
+        idx = FullTextIndex.bootstrap(
+            tmp_path / "b2.fts", snap, fulltext=SECRET_FULLTEXT
+        )
+    with store.snapshot(principal=ROOT) as snap:
+        assert len(idx.search("crystal", snapshot=snap)) == 2  # full mirror
+    idx.close()
+    store.close()

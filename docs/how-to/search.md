@@ -27,6 +27,12 @@ store.attach(idx)
 for hit in idx.search("Kristall"):     # stemming: finds "Kristalle", ranked by BM25
     print(hit.score, hit.typename, hit.snippet)   # snippet marks matches [like] this
 minerals = store.get_many([hit.oid for hit in idx.search("Tsumeb", cls=Mineral)])
+
+# Searching an index that covers protected classes: pass a principal-bound
+# snapshot — hits are post-filtered to what that principal may read (R13).
+with store.snapshot(principal=user) as snap:
+    for hit in idx.search("Kristall", snapshot=snap):
+        print(hit.snippet)                         # only rows `user` can read
 ```
 
 - **Stemming is per-field**: `dc.FullText(language="de")` gets index-time Snowball
@@ -43,14 +49,27 @@ minerals = store.get_many([hit.oid for hit in idx.search("Tsumeb", cls=Mineral)]
   not retained — the [snapshot-bootstrap recipe](snapshots-and-delta-log.md)). Reopening with a
   different field/language configuration raises `FtsConfigError`: rebuild, a half-matching index is
   stale.
-- **Protected records (ADR-008 R13):** `protected=True` classes are FTS-indexable — the owner
-  ruled search over protected data in, rather than refusing it — but post-filtering ranked hits to
-  the querying principal's readable set is `[planned — W4]`. Honesty obligation that comes with
-  R13: the index's own SQLite tables hold the **plaintext** of every indexed field on disk right
-  now — a mirror of protected data is protected data, same as the Arrow mirror. Until W4 ships,
-  treat `idx.search()` as reading with full visibility regardless of who is asking; do not attach
-  `FullTextIndex` to a store holding protected data you are not prepared to have wall-to-wall
-  searchable.
+- **Protected records (ADR-008 R13, enforced):** `protected=True` classes are FTS-indexable — the
+  owner ruled search over protected data in, rather than refusing it — and ranked hits are
+  **post-filtered to the querying principal's readable set**. Pass the readable context as a
+  principal-bound `snapshot=`: every hit is resolved through that snapshot's fenced `get_many` and
+  dropped if it is denied (a `dc.Redacted` twin), deleted, or has no live class; snippets render
+  only for survivors, from the snapshot's **own** view text (never the sidecar's stored copy) — so
+  existence, readability, and excerpt all answer at one `(watermark, principal)`. Over-fetch is
+  geometric (`4 × limit`, doubling) under a hard `scan_cap` (default 2000), so an all-denied
+  principal examines at most `scan_cap` candidates, never a full-table walk. A root-bound snapshot
+  (`store.snapshot(principal=dc.root_principal(...))`) filters nothing.
+  - **Fail-closed:** calling `search()` **without** a `snapshot=` on an index that covers any
+    protected class raises `ReadDeniedError` (pass a snapshot; bind `dc.root_principal(...)` for an
+    unfenced search). Indexes covering only unprotected classes are byte-identical to pre-W4 — no
+    snapshot, no cost. `FullTextIndex.bootstrap()` over a protected class requires a **root-bound**
+    snapshot: a non-root snapshot would honestly return only that principal's readable rows, i.e. a
+    silently partial mirror (worse than a refused one), so it is refused.
+  - **Honesty obligation (R13):** the index's own SQLite tables hold the **plaintext** of every
+    indexed field on disk — a mirror of protected data *is* protected data, exactly like the Arrow
+    mirror. The query-time fence protects `search()` results, not the sidecar file itself: guard the
+    `.fts` file with the same care as the store, and do not hand it to anyone you would not let read
+    every indexed row.
 - Honest limits: unsegmented CJK runs are single tokens under unicode61 (`水晶です` is
   findable only as that whole run) `[planned — segmenting tokenizer, demand-driven]`;
   abugida-script languages (hi/ne/ta) are refused loudly rather than silently broken.
