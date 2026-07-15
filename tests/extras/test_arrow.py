@@ -438,7 +438,7 @@ def test_bootstrap_streams_without_caching(store_factory, tmp_path) -> None:
     store = _store_with_finds(store_factory, 50)
     with store.snapshot() as snap:
         mirror = ArrowMirror.bootstrap(tmp_path / "boot", snap, batch=10)
-        assert len(snap._cache) == 0  # pyright: ignore[reportPrivateUsage]
+        assert len(snap._core.cache) == 0  # pyright: ignore[reportPrivateUsage]
     assert mirror.table(Find).num_rows == 50
     with store.snapshot() as snap2:
         ref = ArrowMirror.bootstrap(tmp_path / "ref", snap2, batch=10_000)

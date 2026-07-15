@@ -19,7 +19,7 @@ import pytest
 
 import datacrystal as dc
 from datacrystal._entity import oid_of
-from datacrystal._snapshot import Snapshot, _VIEW_CHUNK
+from datacrystal._snapshot import Snapshot, _SnapshotCore, _VIEW_CHUNK
 from tests.conftest import Locality, Mineral
 
 MINERAL_T = "tests.conftest:Mineral"
@@ -398,7 +398,7 @@ def test_get_many_uses_one_round_trip_per_chunk(store_factory):
     store.commit()
     oids = [oid_of(m) for m in store.root]
     counting = _CountingReadView(store._backend.read_view())
-    snap = Snapshot(counting)  # pyright: ignore[reportArgumentType]  # structural read view
+    snap = Snapshot(_SnapshotCore(counting), dc.Principal(uid=0))  # pyright: ignore[reportArgumentType]  # structural read view
     try:
         views = snap.get_many(oids)  # pyright: ignore[reportArgumentType]  # oid_of -> int | None
         assert len(views) == n
@@ -415,7 +415,7 @@ def test_get_many_is_cache_aware(store_factory):
     _seed(store)
     oids = [oid_of(m) for m in store.root]
     counting = _CountingReadView(store._backend.read_view())
-    snap = Snapshot(counting)  # pyright: ignore[reportArgumentType]  # structural read view
+    snap = Snapshot(_SnapshotCore(counting), dc.Principal(uid=0))  # pyright: ignore[reportArgumentType]  # structural read view
     try:
         first = snap.get_many(oids)  # pyright: ignore[reportArgumentType]  # oid_of -> int | None
         assert all(v is not None for v in first)

@@ -148,7 +148,10 @@ class TestRaisingPathsStageNothing:
             c = Contact(name="Meyer")
             store.store(c)
             store.commit()
-        [view] = store.snapshot().query(dc.fields(Contact).name == "Meyer")
+        # ADR-008 R15: the snapshot binds a principal — bind ANNA (the owner),
+        # else the anonymous ambient principal reads none of her records.
+        [view] = store.snapshot(principal=ANNA).query(
+            dc.fields(Contact).name == "Meyer")
         with pytest.raises(AttributeError, match="read-only"):
             dc.share(view, TEAM, read=dc.VIEWER, write=dc.AGENT)
         with pytest.raises(AttributeError, match="read-only"):

@@ -124,7 +124,11 @@ def test_read_floor_range_plans_as_sorted_index_no_residual(store_factory):
         assert plan.indexed              # ADR-004 rule 3 — W3's composition precondition
         assert plan.residual is None     # no Python residual scan  unfiltered until W3-2
         live = {x.label for x in s.query(F._dc_read_floor <= dc.AGENT)}
-    snap = {v.label for v in s.snapshot().query(F._dc_read_floor <= dc.AGENT)}
+    # ADR-008 R15/W4: the snapshot now binds a principal and enforces — bind
+    # CURATOR_ANNA (the owner) so her readable set is every row, leaving the
+    # predicate S0/S1 unfiltered (an anonymous handle would read none).
+    snap = {v.label for v in
+            s.snapshot(principal=CURATOR_ANNA).query(F._dc_read_floor <= dc.AGENT)}
     assert live == snap == {"S0", "S1"}
     s.close()
 

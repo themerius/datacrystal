@@ -124,6 +124,7 @@ from datacrystal._records import (
 )
 from datacrystal._registry import ObjectRegistry
 from datacrystal._snapshot import Ref, Snapshot
+from datacrystal._snapshot import _SnapshotCore  # pyright: ignore[reportPrivateUsage]  # the per-watermark core ctor
 from datacrystal._storage.protocol import (
     CommitBatch,
     StorageBackend,
@@ -2036,10 +2037,20 @@ class Store:
                 return
         raise DataCrystalError("this consumer is not attached")
 
-    def snapshot(self) -> Snapshot:
+    def snapshot(self, *, principal: Principal | None = None) -> Snapshot:
         """A frozen, read-only view of the committed state at the current
         durable commit watermark — **callable from any thread**, even while
         the owner commits (ADR-001 rider 2; ADR-002 read views).
+
+        Bound to ONE acting principal (ADR-008 R15): ``principal=None`` captures
+        the acting principal in effect NOW (``self.principal`` — the innermost
+        ``acting_as`` scope, or the ambient identity); an explicit
+        :class:`~datacrystal.Principal` binds that identity instead (never
+        resolved via the Actor registry — Principal objects only). Discovery
+        surfaces filter to that principal's readable set; deref surfaces mask
+        denied protected rows as redacted twins. Derive a sibling handle for
+        another identity over the SAME shared state in O(1) with
+        :meth:`Snapshot.for_principal`.
 
         Use it as a context manager and close it promptly: on the sqlite
         backend an open snapshot pins a WAL read transaction. Views are
@@ -2054,7 +2065,9 @@ class Store:
         # The read view isolates itself from the live engine entirely.
         if self._closed:
             raise StoreClosedError("this store has been closed")
-        return Snapshot(self._backend.read_view())
+        bound = principal if principal is not None else self.principal
+        core = _SnapshotCore(self._backend.read_view())  # pyright: ignore[reportPrivateUsage]
+        return Snapshot(core, bound)
 
     def open_blob(self, entity: Any, field: str) -> BinaryIO:
         """Open a committed ``dc.Blob`` field as a binary stream (ADR-007 §3).
@@ -2106,6 +2119,10 @@ class Store:
         if value is None:
             raise ValueError(f"{ti.typename}.{field} is None — no blob to open")
         if isinstance(value, BlobHandle):
+            if ti.protected:  # ADR-008 W4-3: a blob is fenced with its owner
+                oid = oid_of(entity)
+                if oid is not None:
+                    self._blob_read_gate(oid)
             view = self._backend.read_view()
             return view.open_blob_stream(value.blob_oid, on_close=view.close)
         if isinstance(value, (bytes, bytearray)):
@@ -3175,6 +3192,37 @@ class Store:
                 fp_values[i] = BlobToken(0, v.size, b"")
         return fingerprint_payload(fp_values, self._oid_for_encode)
 
+    def _blob_read_gate(self, owner_oid: int) -> None:
+        """Enforce that the CURRENT principal may read the record that owns a
+        blob (ADR-008 W4-3) — a blob is readable only if its owning record is.
+        Called by :meth:`BlobHandle.bytes` and :meth:`open_blob` for a
+        PROTECTED owner (the caller guards on ``ti.protected``, so an
+        unprotected owner never reaches here — zero cost). Judges COMMITTED
+        labels, exactly like the deref checkpoint (D1); root passes.
+
+        Raises:
+            ReadDeniedError: the owning record is unreadable by the principal.
+        """
+        p = self.principal
+        if is_root(p):
+            return
+        obj = self._registry.get(owner_oid)
+        if obj is not None:
+            ti = type_info(obj)
+            labels = self._index.ensure(ti).committed_labels(owner_oid)
+            if labels is not None and can_read_row(p, *labels):
+                return
+        else:
+            rec = self._backend.load_many([owner_oid]).get(owner_oid)
+            if rec is not None:
+                owner, groups, read_floor, _wf = self._prior_labels(rec)
+                if can_read_row(p, owner, groups, read_floor):
+                    return
+        raise ReadDeniedError(
+            f"the record owning this blob (oid {owner_oid}) is not readable by "
+            "the current principal — its blobs are fenced with it (ADR-008 W4-3)"
+        )
+
     def _load_blob_bytes(self, blob_oid: int) -> bytes:
         """Fetch one whole blob value for a :class:`~datacrystal.Blob` handle
         (ADR-007). Re-asserts the ADR-001 owner-thread contract before any I/O —
@@ -3508,7 +3556,12 @@ class Store:
             # A dc.Blob field hydrates to a lazy BlobHandle, never raw bytes
             # (ADR-007 §3): .size/.hash are free from the descriptor, .bytes()
             # fetches on first touch and demotes like Lazy.
-            return BlobHandle._bind(value.blob_oid, value.size, value.hash, self)  # pyright: ignore[reportPrivateUsage]
+            # ADR-008 W4-3: pass the owner OID only when the owner is protected,
+            # so .bytes() can re-gate the read under the current principal; an
+            # unprotected owner stays byte-identical (owner_oid=None → no gate).
+            owner_oid = oid_of(owner) if type_info(owner).protected else None
+            return BlobHandle._bind(value.blob_oid, value.size, value.hash, self,  # pyright: ignore[reportPrivateUsage]
+                                    owner_oid=owner_oid)
         if isinstance(value, RefToken):
             if lazy:
                 existing = self._registry.get(value.oid)
