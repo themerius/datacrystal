@@ -80,6 +80,7 @@ from datacrystal._entity import (
     TypeInfo,
     _is_list_of_scalar,  # pyright: ignore[reportPrivateUsage]  # engine leaf-set predicate, no second "scalar" definition
 )
+from datacrystal._redacted import Redacted
 from datacrystal._snapshot import EntityView, Ref, Snapshot
 from datacrystal.web._reflect import (
     FieldDescriptor,
@@ -137,7 +138,15 @@ class SnapshotLoader:
             # get_many is sync (a snapshot read view); the DataLoader contract is
             # an async load_fn returning a list aligned 1:1 with the keys —
             # exactly get_many's shape (#94), None where an OID is gone.
-            return snapshot.get_many(oids)
+            #
+            # Read fence (ADR-008 W4-4): a denied protected row comes back from
+            # get_many as a redacted twin (isinstance(_, Redacted); any data-field
+            # access RAISES). Map it to None HERE — BEFORE Strawberry resolves the
+            # reference's subfields — so a denied ``about`` ref resolves to GraphQL
+            # null exactly like a dangling/deleted ref (denied ≡ dangling ≡ null;
+            # no existence leak), never a 500 from getattr on the twin.
+            views = snapshot.get_many(oids)
+            return [None if isinstance(v, Redacted) else v for v in views]
 
         # cache=False is the load-bearing argument (see the class docstring): the
         # default cache=True is a lifetime cache that leaks across watermarks.
