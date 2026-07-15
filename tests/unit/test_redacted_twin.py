@@ -304,3 +304,86 @@ def test_lazy_get_unprotected_target_still_caches(store_factory):
     second = handle.get()
     assert second is first  # same cached instance, no re-derivation
     s2.close()
+
+
+# --- Fable read-fence review follow-ups: peek()/__repr__ + pre-commit deref ---
+
+
+@dc.entity
+class Vault:
+    """Unprotected parent holding a protected child through a USER ``Lazy.of``
+    handle — the cross-principal shared-graph shape the Fable review exploited
+    (the handle keeps its cached ``_obj`` and is reachable by any principal that
+    reaches the live parent)."""
+
+    label: Annotated[str, dc.Unique]
+    secret: dc.Lazy[Dossier] | None = None
+
+
+def test_peek_returns_none_for_a_protected_target(store):
+    # peek() is a cheap, principal-free inspection: it must never expose a
+    # protected target's real instance (Fable finding A — .get() alone was
+    # guarded, .peek()/__repr__ leaked). It fences uniformly (even for the
+    # owner); .get() is the way in.
+    with store.acting_as(OWNER):
+        v = Vault(label="v", secret=dc.Lazy.of(Dossier(label="d", note="classified")))
+        store.store(v)
+        store.commit()
+    sec = v.secret
+    assert sec is not None
+    assert sec.peek() is None                          # fenced
+    with store.acting_as(OWNER):
+        assert sec.get().note == "classified"          # .get() is the checkpoint
+    # An UNPROTECTED target still peeks normally (byte-identical behaviour).
+    with store.acting_as(OWNER):
+        p = PlainHolder(label="ph", linked=dc.Lazy.of(Plain(label="pl")))
+        store.store(p)
+        store.commit()
+    assert p.linked is not None and p.linked.peek() is not None
+
+
+def test_repr_of_a_protected_handle_hides_fields(store):
+    with store.acting_as(OWNER):
+        v = Vault(label="v", secret=dc.Lazy.of(Dossier(label="d", note="XYZZY")))
+        store.store(v)
+        store.commit()
+    r = repr(v.secret)
+    assert "protected" in r          # names the state, not the data
+    assert "XYZZY" not in r          # no field content
+    assert "_dc_owner" not in r      # no label columns
+
+
+def test_cross_principal_peek_and_get_leak_is_closed(store):
+    # A curator's user Lazy.of(protected) handle in a shared live parent must
+    # not serve the real instance to a later acting_as(outsider) scope — via
+    # peek() OR get() (Fable leak #2 + #3).
+    with store.acting_as(OWNER):
+        v = Vault(label="v", secret=dc.Lazy.of(Dossier(label="d", note="secret")))
+        store.store(v)
+        store.commit()
+    sec = v.secret
+    assert sec is not None
+    with store.acting_as(OUTSIDER):
+        assert sec.peek() is None                      # peek fenced
+        got = sec.get()
+        assert isinstance(got, dc.Redacted)            # get → twin
+        with pytest.raises(dc.ReadDeniedError):
+            _ = got.note
+
+
+def test_owner_derefs_own_uncommitted_protected_target(store):
+    # Over-fence regression (Fable finding B): the owner must be able to deref
+    # its OWN just-stored, uncommitted protected entity — the fix judges live
+    # birth labels in the pre-commit window instead of raising DanglingRefError.
+    # An outsider in that same window still gets a twin.
+    with store.acting_as(OWNER):
+        v = Vault(label="v", secret=dc.Lazy.of(Dossier(label="d", note="wip")))
+        store.store(v)                                 # stored, NOT yet committed
+        sec = v.secret
+        assert sec is not None
+        assert sec.get().note == "wip"                 # owner reads own in-flight work
+        with store.acting_as(OUTSIDER):
+            assert isinstance(sec.get(), dc.Redacted)  # outsider still fenced
+        store.commit()
+    with store.acting_as(OWNER):
+        assert sec.get().note == "wip"                 # still readable post-commit
