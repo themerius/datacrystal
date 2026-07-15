@@ -52,17 +52,22 @@ import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from datacrystal._entity import TYPES_BY_NAME
-from datacrystal._errors import DataCrystalError
+from datacrystal._errors import DataCrystalError, ReadDeniedError
+from datacrystal._permissions import is_root
 from datacrystal._records import decode_payload
+from datacrystal._redacted import Redacted
 from datacrystal.contract.applier import (
     CONTRACT_VERSION,
     FORMAT_MARKER,
     DeltaFormatError,
     DeltaGapError,
 )
+
+if TYPE_CHECKING:
+    from datacrystal._snapshot import EntityView, Snapshot
 
 try:
     import snowballstemmer
@@ -253,6 +258,17 @@ class FullTextIndex:
         self._fields: tuple[str, ...] = tuple(sorted({
             field for fields in self._fulltext.values() for field in fields
         }))
+        # The read-fence trigger set, computed ONCE (ADR-008 R13/W4-5): a
+        # configured typename whose live @entity class is protected — OR whose
+        # live class is UNKNOWN in this process (a persisted _dc_* lineage with
+        # the code removed is fail-closed, indistinguishable-from-protected).
+        # Empty set ⇒ search() with snapshot=None stays byte-identical to pre-W4
+        # (zero cost, no principal, no filtering); a non-empty set makes the
+        # no-snapshot call fail closed.
+        self._protected_typenames: frozenset[str] = frozenset(
+            typename for typename in self._fulltext
+            if (ti := TYPES_BY_NAME.get(typename)) is None or ti.protected
+        )
         self._stemmers: dict[str, Any] = {}
         self._languages_by_field: dict[str, tuple[str, ...]] = {
             field: tuple(sorted({
@@ -345,7 +361,7 @@ class FullTextIndex:
     # -- bootstrap (the §5 mid-life attach recipe) -----------------------------
 
     @classmethod
-    def bootstrap(cls, path: str | Path, snapshot: Any, *,
+    def bootstrap(cls, path: str | Path, snapshot: "Snapshot", *,
                   fulltext: Mapping[str, Mapping[str, str | None]] | None = None,
                   ) -> "FullTextIndex":
         """(Re)build the index from one ``store.snapshot()`` — the canonical
@@ -353,8 +369,31 @@ class FullTextIndex:
         rebuild path after a detach/staleness refusal. Any existing file at
         ``path`` is replaced: a sidecar that needed a rebuild is stale by
         definition.
+
+        The FTS sidecar is a MIRROR of the indexed columns on disk, so a mirror
+        of protected data is protected data (ADR-008 R13). When the index covers
+        any protected class a bootstrap over a NON-root snapshot would build a
+        silently partial mirror (each ``snapshot.all(typename)`` honestly returns
+        only that principal's readable rows), so it is refused — a root-bound
+        snapshot is required (the audited-root build precedent, mirroring the
+        Phase-1 ``_stream``/``all(str)`` fail-closed guards). Indexes covering
+        only unprotected classes bootstrap under any snapshot.
+
+        Raises:
+            ReadDeniedError: the index covers a protected/label-bearing class and
+                ``snapshot`` is not root-bound (W4-5).
         """
         idx = cls(path, fulltext=fulltext, _wipe=True)
+        if idx._protected_typenames and not is_root(snapshot.principal):
+            idx.close()  # never leave a half-built partial mirror on disk
+            raise ReadDeniedError(
+                "FullTextIndex.bootstrap() over an index covering protected "
+                f"classes ({', '.join(sorted(idx._protected_typenames))}) "
+                "requires a root-bound snapshot — a non-root snapshot yields "
+                "only that principal's readable rows, a silently partial mirror "
+                "(worse than a refused one). Bootstrap with "
+                "store.snapshot(principal=dc.root_principal(...)) (ADR-008 R13)"
+            )
         idx._exec("BEGIN")
         try:
             for cid, typename, fields in snapshot.types:
@@ -387,7 +426,9 @@ class FullTextIndex:
     # -- search ----------------------------------------------------------------
 
     def search(self, query: str, *, cls: type | str | None = None,
-               limit: int = 20, match: str = "any") -> list[SearchHit]:
+               limit: int = 20, match: str = "any",
+               snapshot: "Snapshot | None" = None,
+               scan_cap: int = 2000) -> list[SearchHit]:
         """BM25-ranked full-text matches for ``query``.
 
         ``match`` chooses how query terms combine (each term itself always
@@ -406,12 +447,52 @@ class FullTextIndex:
         Quoted phrases stay phrases under either mode. ``cls`` narrows to one
         entity type (class or typename string). Every term is quoted into the
         FTS5 expression, so user input cannot inject MATCH operators.
+
+        **Read fence (ADR-008 R13).** ``snapshot`` is the readable context — a
+        PRINCIPAL-bound :class:`~datacrystal.Snapshot`. When given, every ranked
+        hit is resolved through that snapshot's fenced ``get_many`` and DROPPED
+        if it comes back ``None`` (deleted / no live class) or a
+        :class:`~datacrystal.Redacted` twin (denied) — denial, deletion and
+        unresolvability all fail closed through the one seam. Snippets then
+        render from the SURVIVING view's OWN text, never the sidecar's stored
+        copy, so existence, readability and excerpt all answer at one
+        (watermark, principal). A root-bound snapshot filters nothing.
+
+        Over-fetch is geometric (``4 × limit``, doubling each round) so that a
+        run of denied top hits does not under-fill the page, bounded by a hard
+        ``scan_cap`` (default 2000): an all-denied principal examines at most
+        ``scan_cap`` candidates, never a full-table walk.
+
+        When ``snapshot`` is ``None`` and the index covers ONLY unprotected
+        classes, the call is byte-identical to pre-W4 (zero cost). When
+        ``snapshot`` is ``None`` and the index covers ANY protected class this
+        RAISES :class:`ReadDeniedError` (fail-closed, the R12 doctrine) — pass a
+        ``snapshot=``; bind ``dc.root_principal(...)`` for an unfenced search.
         """
         typename = self._typename_of(cls) if cls is not None else None
         expression = self._match_expression(query, typename, match)
         if expression is None:
             return []
         needles = self._needles(query)
+        if snapshot is None:
+            if self._protected_typenames:
+                raise ReadDeniedError(
+                    "FullTextIndex.search() over an index covering protected "
+                    f"classes ({', '.join(sorted(self._protected_typenames))}) "
+                    "requires a principal-bound snapshot (ADR-008 R13): pass "
+                    "snapshot=; bind dc.root_principal(...) for an unfenced search"
+                )
+            return self._search_unfenced(expression, typename, needles, limit)
+        return self._search_fenced(
+            expression, typename, needles, limit, snapshot, scan_cap
+        )
+
+    def _search_unfenced(self, expression: str, typename: str | None,
+                         needles: _Needles, limit: int) -> list[SearchHit]:
+        """The pre-W4 path (snapshot is None, no protected class in the index):
+        BM25 + LIMIT with snippets rendered from the sidecar's own ``r_`` text.
+        Kept byte-identical to preserve zero-cost search over public indexes.
+        """
         weights = "0.0, " + ", ".join("2.0, 1.0, 0.0" for _ in self._fields)
         raws = ", ".join(f"r_{f}" for f in self._fields)
         sql = (
@@ -437,6 +518,83 @@ class FullTextIndex:
                     snippets[field] = excerpt
             hits.append(SearchHit(oid, hit_typename, -rank, snippets))
         return hits
+
+    def _search_fenced(self, expression: str, typename: str | None,
+                       needles: _Needles, limit: int, snapshot: "Snapshot",
+                       scan_cap: int) -> list[SearchHit]:
+        """The R13 post-filter path. Collect ranked (oid, typename, rank) ONLY,
+        resolve each through the snapshot's fenced ``get_many`` (dropping
+        None/Redacted), and build SearchHits — with snippets rendered from the
+        surviving view's own text — for SURVIVORS ONLY. A dropped row's stored
+        text is never read, so the sidecar's on-disk copy can never leak past
+        the fence (closes the watermark-skew leak).
+
+        BM25 + LIMIT under-returns once hits are filtered, so the scan window
+        widens geometrically (``limit*4`` then doubling) under the ``scan_cap``
+        hard bound. The SQL adds a ``rowid`` tiebreak to ``ORDER BY r`` so the
+        row order is stable across rounds and each wider round is a strict
+        superset-prefix of the last (only genuinely NEW oids are resolved).
+        """
+        weights = "0.0, " + ", ".join("2.0, 1.0, 0.0" for _ in self._fields)
+        sql = (
+            f"SELECT rowid, typename, bm25(docs, {weights}) AS r "
+            f"FROM docs WHERE docs MATCH ?"
+        )
+        params: list[Any] = [expression]
+        if typename is not None:
+            sql += " AND typename = ?"
+            params.append(typename)
+        sql += " ORDER BY r, rowid LIMIT ?"
+
+        survivors: list[tuple[int, str, float, "EntityView"]] = []
+        examined = 0            # ranked rows already classified across rounds
+        window = max(limit, 1) * 4
+        while True:
+            fetch = min(window, scan_cap)
+            rows = self._conn.execute(sql, [*params, fetch]).fetchall()
+            new_rows = rows[examined:]
+            resolved = (
+                snapshot.get_many([row[0] for row in new_rows])
+                if new_rows else []
+            )
+            for (oid, hit_typename, rank), view in zip(new_rows, resolved):
+                if view is None or isinstance(view, Redacted):
+                    continue  # deleted / no-live-class / denied — fail closed
+                survivors.append((oid, hit_typename, rank, view))
+            examined = len(rows)
+            if len(survivors) >= limit:
+                break
+            if len(rows) < fetch:
+                break           # corpus exhausted — no more candidates exist
+            if fetch >= scan_cap:
+                break           # hard cap: never a full-table walk
+            window *= 2
+
+        return [
+            SearchHit(oid, hit_typename, -rank,
+                      self._snippets_from_view(view, hit_typename, needles))
+            for oid, hit_typename, rank, view in survivors[:limit]
+        ]
+
+    def _snippets_from_view(self, view: "EntityView", typename: str,
+                            needles: _Needles) -> dict[str, str]:
+        """Render highlighted snippets from a SURVIVING snapshot view's OWN
+        field text (never the sidecar's stored ``r_`` copy) — so the excerpt is
+        read at the same (watermark, principal) that judged readability.
+        """
+        snippets: dict[str, str] = {}
+        configured = self._fulltext.get(typename, {})
+        fields = view.fields()
+        for field in self._fields:
+            if field not in configured:
+                continue
+            text = fields.get(field)
+            if not isinstance(text, str) or not text:
+                continue
+            excerpt = self._highlight(text, configured[field], needles)
+            if excerpt is not None:
+                snippets[field] = excerpt
+        return snippets
 
     # -- lifecycle ---------------------------------------------------------------
 
