@@ -84,9 +84,11 @@ stale venv shebangs — `rm -rf .venv && uv sync`.
   (read-as-before/ADMIN-write), floor ceiling ≤ own authority, the **audited root**
   (EXECUTIVE-in-PUBLIC break-glass, no new API surface), protected classes Lazy-referable only,
   mask-on-deref/filter-on-discovery, FTS post-filter, `WriteDeniedError`/`ReadDeniedError`.
-  Two items ratify at ADR review, gating W3+ only: **R14** (masked traversal, two live
-  variants) and **R15** (snapshot-pool overlay, adopted default). Audit half = COMMIT-DELTA-v2;
-  the "why" = `docs/research/2026-07-11-permissions/concept.md`.
+  Two items ratified 2026-07-13 at the W3-planning review (gate W3+ only): **R14** = masked
+  traversal via the redacted twin **as the default, no flag** (variant (a); field access on a
+  denied twin raises, per-principal twins = a ruled exception to invariant 6) and **R15** =
+  snapshot-pool overlay **bound at `snapshot()` time** (adopted as drafted). Audit half =
+  COMMIT-DELTA-v2; the "why" = `docs/research/2026-07-11-permissions/concept.md`.
 - `docs/` — user-facing semantics, a **Diátaxis split** (#128): `docs/GUIDE.md` is the thin index
   (README/design docs link to it), `docs/tutorial.md` the first session, `docs/how-to/*.md` the
   goal recipes, `docs/reference.md` the dry complete API (the drift-guard's target), and

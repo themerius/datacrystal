@@ -1,12 +1,13 @@
 # ADR-008: the permissions contract — floors, fences, and the audited root
 
 Status: **Accepted 2026-07-13** (owner rulings: batch 1 on 2026-07-12, batch 2 on
-2026-07-13 — issue #170). Two items ride this ADR's review instead of being
-accepted here, both marked in place: **R14** (masked-traversal semantics —
-PROPOSED, two live variants) and **R15** (an adopted default the interview
-never asked — reclassified 2026-07-13, same day, after adversarial review of
-this draft). Both gate W3+, never W2. Scope: epic #168 (campaign milestone
-"Permissions"). The audit half of the contract — actor-stamped commits — is
+2026-07-13 — issue #170). The two items that rode this ADR's review — **R14**
+(masked-traversal semantics) and **R15** (snapshot-pool overlay) — were
+**ratified 2026-07-13 at the W3-planning review**: R14 = variant (a), the
+redacted twin as the default; R15 = adopted as drafted (bind the principal at
+`snapshot()` time). The owner rulings are recorded in their sections below;
+both gate W3+, never W2, and both are now settled — W3-4 builds against R14
+variant (a). Scope: epic #168 (campaign milestone "Permissions"). The audit half of the contract — actor-stamped commits — is
 ratified as [COMMIT-DELTA-v2](COMMIT-DELTA-v2.md) and **not repeated here**;
 this ADR rules enforcement. The design rationale (why per-record labels, why
 floors, why not Zanzibar/RLS-style policy) lives in the concept study
@@ -211,8 +212,8 @@ classes** — raw postings leak existence *and* label structure, no honest
 post-filter of value-keyed postings exists, so this one unfilterable surface
 refuses instead (the ADR author's fail-closed call from the study's leak
 analysis; the only ancillary read that raises). The denied-data raise point
-for refs is whatever R14's ratification fixes (strict deref, or field access
-on a redacted twin) — this ruling is R14-outcome-independent.
+for refs is field access on the redacted twin (R14 variant (a)) — this ruling
+was drafted R14-outcome-independent and holds unchanged under it.
 
 ### R13 · FTS post-filters (owner override of the refusal proposal)
 
@@ -236,12 +237,17 @@ preference was a `masked=True` keyword on the existing calls
 (`get(masked=True)`, "and query etc.")**; the study's separate `get_masked()`
 method is retired either way.
 
-**PROPOSED semantics — two live variants, ratify at this ADR's review
-(gates W3-4 only):**
+**Ratified 2026-07-13 (W3-planning review): variant (a) — the redacted twin
+as the default, no flag.** The owner chose zero call-site churn over explicit
+opt-in, accepting that masking-by-default is implicit; the loud-on-denied-field-
+access rule (traversal graceful, *using* redacted data raises) is the
+mitigation. This ratifies the exception to invariant 6 (per-principal twins,
+never in the shared registry) as ruled. Variant (b)'s `masked=` keyword is NOT
+part of the shipped surface. The two options as they stood before ratification,
+kept for the record:
 
-- **(a) The redacted twin — masking as the default, no flag** (the ADR
-  author's proposal; note plainly: this *inverts* the owner's opt-in flag
-  into default behavior the owner has not yet approved). Deref of a
+- **(a) The redacted twin — masking as the default, no flag** (ratified). Deref
+  of a
   denied-but-existing target never raises; it returns an instance of a
   per-class subclass (`isinstance(x, Contact)` True, `isinstance(x,
   dc.Redacted)` True) that is frozen, field-empty, never committable, and
@@ -267,11 +273,13 @@ Either variant uses the same twin object; they differ only in the default.
 Reclassified 2026-07-13 (same-day adversarial review of this draft): this
 item was **never asked in the batch-2 interview** — it is the #170 proposal
 carried forward as an applied default, kept out of the rulings' authority.
-Ratify alongside R14 at this ADR's review. The default: snapshots pin the
-principal in effect at `snapshot()` time; enforcement rides a cheap
-per-principal readable-bitmap layer computed over the **shared**
-per-watermark snapshot indexes. The pool's economics are untouched — index
-builds stay O(n) per commit, never O(n) per principal or per request.
+**Ratified 2026-07-13 (W3-planning review): adopted as drafted.** Snapshots pin
+the principal in effect at `snapshot()` time — a snapshot is a
+(watermark, principal) pair, consistent with its frozen-at-a-watermark
+contract; enforcement rides a cheap per-principal readable-bitmap layer computed
+over the **shared** per-watermark snapshot indexes. The pool's economics are
+untouched — index builds stay O(n) per commit, never O(n) per principal or per
+request.
 
 ### R16 · Deferred out of this campaign (confirmed)
 
@@ -286,8 +294,8 @@ until followers have principals.
 
 ## Consequences
 
-- Wave resize: W3 ≈ 19 concerns (+2 masked path — figure assumes R14 variant
-  (a); resize at ratification), W4 ≈ 20 (+3 FTS post-filter, R13). Committed
+- Wave resize: W3 ≈ 19 concerns (+2 masked path — per ratified R14 variant
+  (a)), W4 ≈ 20 (+3 FTS post-filter, R13). Committed
   campaign ≈ **84 concerns** (W0–W2 ≈ 45 per #172 + W3 ≈ 19 + W4 ≈ 20); the
   ~100 figure from the 2026-07-12 epic verification covered the full concept
   *including* the work R16 now defers. Wave issues #172/#173/#174 were
@@ -295,8 +303,8 @@ until followers have principals.
 - The write gate and readable compiler each carry exactly one special case
   (root, R9); everything else is the predicate block above.
 - New public surface when the waves land: `WriteDeniedError`,
-  `ReadDeniedError`, `dc.Redacted` (shape contingent on R14's ratified
-  variant), the label verbs, `dc_permissions` — each documented in
+  `ReadDeniedError`, `dc.Redacted` (the redacted twin — R14 variant (a)),
+  the label verbs, `dc_permissions` — each documented in
   `docs/reference.md` in its shipping PR (DoD), floors marked
   `[planned — W3/W4]` until their fence actually enforces.
 - The concept study's "Open decisions" section points here; its §"Audit"
