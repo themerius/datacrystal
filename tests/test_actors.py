@@ -69,8 +69,9 @@ class TestActorRegistry:
         store.close()
 
         reopened = store_factory()
-        anna = reopened.get(dc.Actor, uid=2)
-        swarm = reopened.get(dc.Actor, uid=900)
+        with reopened.acting_as(BOOT):          # BOOT owns these rows (ADR-008 read fence)
+            anna = reopened.get(dc.Actor, uid=2)
+            swarm = reopened.get(dc.Actor, uid=900)
         assert anna is not None and anna.human and anna.display == "Anna"
         assert anna.memberships == {1: dc.STAFF, 2: dc.CURATOR}
         assert swarm is not None and not swarm.human and swarm.sponsor == 2
@@ -97,7 +98,8 @@ class TestActorRegistry:
         store.close()
 
         reopened = store_factory()
-        again = reopened.get(dc.Actor, uid=2)
+        with reopened.acting_as(BOOT):           # BOOT owns this row (ADR-008 read fence)
+            again = reopened.get(dc.Actor, uid=2)
         assert again is not None and again.memberships == {1: dc.STAFF, 2: dc.CURATOR}
         reopened.close()
 
@@ -112,5 +114,5 @@ class TestActorRegistry:
             store.store(dc.Actor(uid=5, display="registry row", human=True))
             store.store(Actor(name="stage play lead"))
             store.commit()
-        assert store.get(dc.Actor, uid=5).display == "registry row"
+            assert store.get(dc.Actor, uid=5).display == "registry row"
         assert store.count(Actor) == 1

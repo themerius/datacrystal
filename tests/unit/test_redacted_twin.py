@@ -239,7 +239,8 @@ def test_lazy_get_never_leaks_the_real_instance_across_principals(store_factory)
     s.close()
 
     s2 = store_factory()
-    parent2 = s2.get(Dossier, label="parent-with-link")
+    with s2.acting_as(OWNER):               # she is the owner (ADR-008 read fence)
+        parent2 = s2.get(Dossier, label="parent-with-link")
     handle = parent2.linked
     assert handle is not None
 
@@ -276,8 +277,9 @@ def test_resolve_never_prehydrates_a_protected_handle_on_a_registry_hit(store_fa
     s.close()
 
     s2 = store_factory()
-    _ = s2.get(Dossier, label="prehydrate-target")  # registers the TARGET first
-    parent2 = s2.get(Dossier, label="prehydrate-parent")  # hydrates via a registry HIT
+    with s2.acting_as(OWNER):               # she is the owner (ADR-008 read fence)
+        _ = s2.get(Dossier, label="prehydrate-target")  # registers the TARGET first
+        parent2 = s2.get(Dossier, label="prehydrate-parent")  # hydrates via a registry HIT
     assert parent2.linked is not None
     assert parent2.linked.peek() is None  # NOT pre-loaded, despite the registry hit
     s2.close()

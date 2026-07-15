@@ -72,8 +72,9 @@ class TestActingAs:
     def test_resolved_principal_is_decoupled_from_the_live_row(self, store):
         _registry(store)
         with store.acting_as(2) as anna:
-            row = store.get(dc.Actor, uid=2)
-            row.memberships[ORG] = dc.ADMIN  # a later grant …
+            with store.acting_as(BOOT):        # BOOT owns the row (ADR-008 read fence);
+                row = store.get(dc.Actor, uid=2)  # anna's own row shares no group with her
+                row.memberships[ORG] = dc.ADMIN  # a later grant …
             assert anna.memberships == {ORG: dc.STAFF, TEAM: dc.CURATOR}  # … not this scope
 
     def test_unknown_uid_refuses(self, store):

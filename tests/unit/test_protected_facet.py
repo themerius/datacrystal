@@ -99,7 +99,8 @@ def test_columns_roundtrip_through_commit_and_reopen(store_factory):
     s1.close()
 
     s2 = store_factory()
-    back = s2.get(Specimen, label="fluorite-03")
+    with s2.acting_as(CURATOR_ANNA):        # she holds group 7 (ADR-008 read fence)
+        back = s2.get(Specimen, label="fluorite-03")
     assert back is not None
     assert back.mass_g == 3.3
     assert back._dc_owner == 2
@@ -118,10 +119,11 @@ def test_read_floor_range_plans_as_sorted_index_no_residual(store_factory):
             spec._dc_read_floor = floor
         s.commit()
 
-    plan = s.explain(F._dc_read_floor <= dc.AGENT)
-    assert plan.indexed                # ADR-004 rule 3 — W3's composition precondition
-    assert plan.residual is None       # no Python residual scan
-    live = {x.label for x in s.query(F._dc_read_floor <= dc.AGENT)}
+    with s.acting_as(CURATOR_ANNA):          # she owns all three (ADR-008 read fence);
+        plan = s.explain(F._dc_read_floor <= dc.AGENT)  # query()/explain() stay
+        assert plan.indexed              # ADR-004 rule 3 — W3's composition precondition
+        assert plan.residual is None     # no Python residual scan  unfiltered until W3-2
+        live = {x.label for x in s.query(F._dc_read_floor <= dc.AGENT)}
     snap = {v.label for v in s.snapshot().query(F._dc_read_floor <= dc.AGENT)}
     assert live == snap == {"S0", "S1"}
     s.close()
@@ -230,7 +232,8 @@ def test_frozen_protected_constructs_commits_and_reads(store_factory):
     s.close()
 
     s2 = store_factory()
-    back = s2.get(SealedEvent, seq=1)
+    with s2.acting_as(CURATOR_ANNA):        # she is the owner (ADR-008 read fence)
+        back = s2.get(SealedEvent, seq=1)
     assert back is not None
     assert back.dc_permissions.write_floor == dc.VIEWER
     assert back.dc_permissions.owner == 2   # frozen-safe stamping (object.__setattr__)

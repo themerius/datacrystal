@@ -755,6 +755,12 @@ class Contact:
   `dc.Actor` registry is itself protected under exactly this rule.
 - `upsert()` **never merges label columns** — an ETL probe instance's birth defaults
   cannot reset a survivor's curated labels (`/v1/submit` rides upsert).
+- `upsert()`'s natural-key lookup is **read-unfenced by design** (ADR-008 W3-3): a
+  filtered lookup would duplicate-then-collide instead of merging. Accepted
+  consequence — a probe with a key that already belongs to a record you could not
+  `get()` still returns that record as the survivor (an existence-plus-data exposure
+  on this one write surface); the commit gate still fences the actual write, so
+  nothing is persisted without authority.
 - **The label verbs** stage changes through normal dirty-tracking and commit with
   everything else — they check no authority themselves (stage-now-reject-at-commit is
   what makes the maker–checker flow work; the commit gate rules against the
@@ -816,10 +822,16 @@ class Contact:
 - Honesty note: the **deref checkpoint enforces today** — `lazy_ref.get()`
   returns the real instance, a `dc.Redacted` twin, or raises
   `DanglingRefError`, and never caches a protected target across an
-  `acting_as()` scope change. **Discovery surfaces filter on top of it**
-  `[planned — Permissions W3-2/W3-3]`: `query`/`query_iter`/`get`/
-  `get_many`/`count`/`pluck`/`incoming` still return everything, unfiltered
-  by read floor, until then.
+  `acting_as()` scope change. **`get`/`get_many`/`incoming` filter on top of
+  it today** (ADR-008 W3-3): a denied `get`/`get_many(cls, key=...)` key
+  is a `None` slot (R12: found-but-denied ≡ absent, never leaks
+  existence); the `get_many(iterable)` OID/`Lazy`/`Ref` deref form and
+  `incoming()`'s protected referrers follow R12/R14 (a denied OID/`Ref`
+  item returns a `dc.Redacted` twin — you already held that reference —
+  while a denied `incoming()` referrer is silently absent, since backlinks
+  are discovery). `query`/`query_iter`/`count`/`pluck`/`explain` **still
+  return everything, unfiltered by read floor** `[planned — Permissions
+  W3-2]`.
 
 ## Snapshots
 
