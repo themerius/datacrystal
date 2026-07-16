@@ -47,7 +47,7 @@ The live/snapshot/blob tiers ride both backends via the ``store``/
 tiers skip cleanly when their extra is absent (per-function ``importorskip``),
 so the extra-free tiers of the matrix always run.
 """
-# pyright: reportAttributeAccessIssue=false, reportCallIssue=false
+# pyright: reportAttributeAccessIssue=false, reportCallIssue=false, reportOptionalMemberAccess=false
 # pyright: reportArgumentType=false, reportFunctionMemberAccess=false
 # pyright: reportPrivateUsage=false, reportUnknownMemberType=false
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
