@@ -261,6 +261,25 @@ analysis; the only ancillary read that raises). The denied-data raise point
 for refs is field access on the redacted twin (R14 variant (a)) — this ruling
 was drafted R14-outcome-independent and holds unchanged under it.
 
+*Amendment 2026-07-16 (W4-6 — closing the `upsert()` survivor-return exposure):
+W3-3 left `upsert()`'s natural-key LOOKUP read-unfenced (a filtered lookup would
+duplicate-then-collide at commit) and accepted as a consequence that `upsert()`
+could RETURN a committed survivor the acting principal could not `get()` — a
+per-record data read gated only on knowing the unique key, and the one
+deref-style surface that still leaked. The W4 completeness review (adversarial
+pass) flagged it as the last exception to "fenced on every per-record read
+surface." **Ruled: the LOOKUP stays unfenced (dedup is untouched — it still finds
+the row), but the RETURN is fenced.** A committed survivor the actor cannot read
+(`can_read_row`, root exempt) is denied with `ReadDeniedError` — `upsert()` is a
+read-modify-write, so it fails closed on an unreadable survivor rather than
+handing it back (fail-closed on absent labels too, though a committed oid always
+has them). The merge, when the survivor IS readable, is fenced by the write floor
+at commit exactly as before. This closes the last per-record read exposure, so the
+campaign's read fence holds on every per-record surface without exception; the four
+full-copy protected outputs (Arrow / retained deltalog / federation `/v1/deltas` /
+`Snapshot._stream`) remain by-design protected by placement + root-binding, not the
+row floor.*
+
 ### R13 · FTS post-filters (owner override of the refusal proposal)
 
 **Ruled:** protected classes ARE FTS-indexable; ranked hits are post-filtered

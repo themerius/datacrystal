@@ -340,12 +340,13 @@ class TestUpsertBypassIntact:
             store.commit()
         assert spec.note == "v2"
 
-    def test_find_by_key_bypasses_the_fence_but_the_write_gate_still_binds(self, store):
-        # Bypass #1 (ADR-008 W3-3, "read-enforcement bypass BY DESIGN"): the
-        # upsert lookup ignores the read fence — an outsider's probe still
-        # FINDS and merges into a record it could never store.get(). The
-        # commit gate is the real fence: nothing is actually persisted
-        # without write authority.
+    def test_upsert_lookup_dedups_but_the_return_is_fenced(self, store):
+        # W4-6 (closing the W3-3 exposure): the upsert LOOKUP stays read-
+        # unfenced so dedup still works — an outsider's probe FINDS the
+        # existing row rather than inserting a colliding duplicate — but the
+        # RETURN is fenced. An outsider who cannot read the survivor gets
+        # ReadDeniedError before anything is merged or handed back: no data
+        # leaks, and nothing is staged (so no confusing collide-at-commit).
         with store.acting_as(OWNER):
             spec = Specimen(label="upsert-hidden", note="v1")  # owner-only
             store.store(spec)
@@ -354,9 +355,6 @@ class TestUpsertBypassIntact:
         with store.acting_as(OUTSIDER):
             assert store.get(Specimen, label="upsert-hidden") is None  # denied by get()
             probe = Specimen(label="upsert-hidden", note="tampered")
-            survivor = store.upsert(probe)                  # bypass #1: still finds it
-            assert survivor is spec
-            assert survivor.note == "tampered"               # merged in memory
-            with pytest.raises(dc.WriteDeniedError):
-                store.commit()                                # the gate still fences it
-            store.discard()
+            with pytest.raises(dc.ReadDeniedError):
+                store.upsert(probe)          # the lookup finds it; the return is denied
+            assert store.commit() is None    # nothing was staged (fail-closed pre-merge)

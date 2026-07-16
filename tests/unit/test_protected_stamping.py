@@ -311,12 +311,16 @@ class TestUpsertShield:
             gem._dc_write_floor = dc.CURATOR           # curated!
             store.commit()
 
-        probe = Gem(name="tourmaline")                 # fresh ETL row, birth defaults
-        survivor = store.upsert(probe)
-        assert survivor is gem
-        assert survivor._dc_owner == 2                 # NOT reset to the probe's 0
-        assert survivor._dc_write_floor == dc.CURATOR  # NOT reset to VIEWER
-        assert list(survivor._dc_groups) == [ORG]
+            # W4-6: upsert's return is fenced, so the re-import runs as a
+            # principal that may read the survivor (its owner). The shield under
+            # test is the label-merge one — the probe's birth defaults must not
+            # reset the survivor's curated labels.
+            probe = Gem(name="tourmaline")             # fresh ETL row, birth defaults
+            survivor = store.upsert(probe)
+            assert survivor is gem
+            assert survivor._dc_owner == 2                 # NOT reset to the probe's 0
+            assert survivor._dc_write_floor == dc.CURATOR  # NOT reset to VIEWER
+            assert list(survivor._dc_groups) == [ORG]
 
     def test_same_batch_pending_survivor_keeps_its_stamp(self, store):
         with store.acting_as(ANNA):
