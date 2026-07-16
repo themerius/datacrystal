@@ -672,9 +672,11 @@ ORG, TEAM = 1, 2                           # group ids are yours to define
 
 # The opening identity comes from app config — someone must open the store
 # that holds the registry (the bootstrap identity is config-trusted, not
-# registry-resolved).
-store = dc.Store.open("cabinet.store",
-                      principal=dc.Principal(uid=1, memberships={ORG: dc.ADMIN}))
+# registry-resolved). Seeding the registry grants authority, so the bootstrap
+# is root: minting an Actor is capped at the registrar's own level per group
+# (ADR-008 R8), and only root may grant a hat in a group it does not itself
+# hold — the "whoever syncs the registry" trust boundary.
+store = dc.Store.open("cabinet.store", principal=dc.root_principal(uid=1))
 
 store.store(dc.Actor(uid=2, display="Anna", human=True,
                      memberships={ORG: dc.STAFF, TEAM: dc.CURATOR}))
