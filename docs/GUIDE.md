@@ -53,4 +53,6 @@ are unchecked, and the design philosophy.
 The ratified decisions behind all of the above live in [docs/design/](design/):
 [VISION.md](design/VISION.md) (the product "why"), [DESIGN.md](design/DESIGN.md) (architecture),
 [ROADMAP.md](design/ROADMAP.md) (scope authority), [KICKOFF.md](design/KICKOFF.md) (engineering
-standards), the [ADRs](design/) (contract decisions), and [SCALING.md](design/SCALING.md).
+standards), the [ADRs](design/) (contract decisions), [SCALING.md](design/SCALING.md), and the
+[sidecar read-fence pattern](design/SIDECAR-READ-FENCE.md) (how to permission-fence a new
+OID-addressed query sidecar like `datacrystal[vector]`).
