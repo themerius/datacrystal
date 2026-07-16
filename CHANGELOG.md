@@ -12,6 +12,38 @@ purely **additive** surface — the v0.1.0 freeze is never broken. PyPI publicat
 
 _No unreleased changes yet._
 
+## [0.9.0] — 2026-07-16
+
+### Added
+
+- **Native permissions** (epic #168, ADR-008): `@entity(protected=True)` records carry
+  owner/groups/floors; `dc.Principal` / `dc.Actor` + the group/level ladder (`VIEWER`…`EXECUTIVE`);
+  fail-closed birth labels; the `dc.share` / `dc.unshare` / `dc.protect` verbs.
+- The **write gate**: the write floor binds everyone including the owner (the curation guarantee);
+  the R8 ceiling caps every grant — including authority-bearing `dc.Actor` mints — at the setter's
+  own level, so only root can mint root.
+- The **read fence** on every per-record surface: the redacted-twin deref (`dc.Redacted` —
+  traversal graceful, using denied data raises), filter-on-discovery, and enforcement across
+  snapshots, the `[web]` REST/GraphQL tier, `[fts]`, and blobs.
+- The **audited root** (`dc.root_principal`, EXECUTIVE-in-WORLD break-glass, no new API surface);
+  `WriteDeniedError` / `ReadDeniedError`.
+
+## [0.8.0] — 2026-06-23
+
+### Added
+
+- **Fractal followers** (`datacrystal[follower]`): the `datacrystal[web]` `web.federation_router`
+  over FEDERATION-WIRE-v1, and the core client half — `Store.follower` / `open_follower` +
+  `sync()` / `discard()` / `committing()`. OCC via the prior-payload digest (no new ADR).
+
+## [0.7.0] — 2026-06-18
+
+### Added
+
+- `datacrystal[web]` one-to-many edges (reflect a `list[Lazy]` adjacency into REST/GraphQL).
+- `datetime` `Index` / `Unique` keys.
+- The nightly 1M-record scaling lane.
+
 ## [0.6.0] — 2026-06-15
 
 ### Added
@@ -87,7 +119,10 @@ The **API-freeze baseline**. Everything after this is additive.
 - Extras: `datacrystal[fts]` (FTS5 + Snowball stemming + BM25) and `datacrystal[arrow]`
   (persistent Parquet mirrors).
 
-[Unreleased]: https://github.com/semanticworks-gmbh/datacrystal/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/semanticworks-gmbh/datacrystal/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/semanticworks-gmbh/datacrystal/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/semanticworks-gmbh/datacrystal/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/semanticworks-gmbh/datacrystal/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/semanticworks-gmbh/datacrystal/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/semanticworks-gmbh/datacrystal/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/semanticworks-gmbh/datacrystal/compare/v0.3.0...v0.4.0
