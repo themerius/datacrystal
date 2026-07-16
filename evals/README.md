@@ -145,12 +145,39 @@ file is absent, and on demand:
 WEB_SMOKE=1 uv run --extra web python evals/proving_grounds/web_api.py
 ```
 
+### #8 — Permissions · the real German solar registry, fenced natively · dl-de/by-2.0 · ~830 MB
+
+The ADR-008 proving ground. The Marktstammdatenregister **redacts itself before
+publishing**: every solar plant is public, but ~84% of operators are `Natürliche
+Person` whose `Firmenname` is legally suppressed (permanently empty in the file),
+while the ~16% that are `Organisation` carry name, address, email and phone. The
+regulator strips the column because a CSV has no read floor. This eval holds the
+*whole* record and enforces the same rule at read time, per principal — then checks
+it two ways: an **oracle** (the public's readable operator set must be exactly the
+set the regulator published, computed independently from the CSV) and an
+**adversarial sieve** driving every per-record read surface from a principal that
+holds standing in the group but sits under the read floor. Also ingests the corpus
+twice — protected and unprotected twin — for the absolute wall-clock the CI gates
+are forbidden to state (invariant 12).
+
+```bash
+curl -sL --create-dirs -o evals/data/mastr_solar.csv.zip \
+  "https://zenodo.org/api/records/14843222/files/bnetza_mastr_solar_raw.csv.zip/content"
+curl -sL --create-dirs -o evals/data/mastr_actors.csv.zip \
+  "https://zenodo.org/api/records/14843222/files/bnetza_mastr_market_actors_raw.csv.zip/content"
+uv run python evals/proving_grounds/permissions_solar.py
+PERM_UNITS=1000000 uv run python evals/proving_grounds/permissions_solar.py  # bigger lane
+```
+
+Unlike #4, this lane needs **no portal download** — the open-MaStR Zenodo mirror is a
+plain keyless HTTPS GET. `PERM_UNITS` (default 200000) sizes the run.
+
 ## Attribution / licenses
 
 - Gene Ontology — CC-BY 4.0, http://geneontology.org
 - GLEIF LEI data — CC0 1.0, https://www.gleif.org. Not endorsed by or affiliated with GLEIF.
 - deps.dev (Open Source Insights), Google LLC — CC-BY 4.0, https://deps.dev
-- MaStR (Marktstammdatenregister, Bundesnetzagentur) — dl-de/by-2.0, https://www.govdata.de/dl-de/by-2-0. Not endorsed by or affiliated with the Bundesnetzagentur.
+- MaStR (Marktstammdatenregister, Bundesnetzagentur) — dl-de/by-2.0, https://www.govdata.de/dl-de/by-2-0. Not endorsed by or affiliated with the Bundesnetzagentur. #8 uses the open-MaStR [unboxed] mirror (Zenodo 10.5281/zenodo.14843222) of the same Gesamtdatenexport, under the same licence — attribution: "Marktstammdatenregister — © Bundesnetzagentur | DL-DE-BY-2.0".
 - BEIR (NFCorpus etc.) — CC-BY-SA-4.0, https://github.com/beir-cellar/beir. MIRACL — Apache-2.0, https://github.com/project-miracl/miracl.
 
 Both datasets are free to redistribute, but we do **not** commit them — keep them in the
