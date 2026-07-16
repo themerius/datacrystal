@@ -695,6 +695,13 @@ store.commit()                             # stamped: actor=1
 - `Actor.sponsor` names a natural person's uid and is **required for every non-human
   actor** — `store.acting_as()` enforces the gate (a technical user without a sponsor
   cannot act).
+- **Registering or re-levelling an `Actor` is authority-bounded** (ADR-008 R8): an
+  Actor's `memberships` *are* authority, so every membership you grant must be ≤ the
+  level you yourself hold in that group. Minting `{dc.WORLD: dc.EXECUTIVE}` (root) thus
+  requires already being root — the config-trusted bootstrap that seeds the registry
+  (a sync daemon or admin, "authenticate outside") acts as `dc.root_principal(...)`. A
+  curator can still onboard a bot within its own group (grant ≤ what you hold); lowering
+  or removing a membership never blocks.
 - `store.acting_as(uid_or_principal)` switches the session identity for a scope, and
   `store.principal` reads the one in effect:
 

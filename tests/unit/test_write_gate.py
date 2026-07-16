@@ -394,6 +394,178 @@ class TestRoot:
             assert store.get(Contact, name="via-factory") is not None
 
 
+class TestActorAuthorityCeiling:
+    """F1 (ADR-008 R8, 2026-07-16): an Actor's memberships ARE authority, so
+    minting/re-levelling one is bounded by the committer's own level per group.
+    Without this, any writer mints itself Actor(WORLD:EXECUTIVE) and acting_as()
+    into root — the whole ladder becomes advisory.
+    """
+
+    def test_lowly_agent_cannot_mint_itself_root(self, store):
+        # The exact break: an agent that is provably fenced on data.
+        with store.acting_as(ROOT):
+            store.store(dc.Actor(uid=900, display="bot", human=True,
+                                 memberships={TEAM: dc.AGENT}))
+            store.commit()
+        with store.acting_as(900):
+            store.store(dc.Actor(uid=999, display="evil", human=True,
+                                 memberships={dc.WORLD: dc.EXECUTIVE}))
+            with pytest.raises(dc.WriteDeniedError, match="only root may mint root"):
+                store.commit()
+            store.discard()
+        with store.acting_as(ROOT):
+            assert store.get(dc.Actor, uid=999) is None      # never committed
+
+    def test_agent_cannot_mint_above_its_own_level(self, store):
+        with store.acting_as(ROOT):
+            store.store(dc.Actor(uid=900, display="bot", human=True,
+                                 memberships={TEAM: dc.AGENT}))
+            store.commit()
+        with store.acting_as(900):
+            store.store(dc.Actor(uid=901, display="promoted", human=True,
+                                 memberships={TEAM: dc.CURATOR}))  # above AGENT
+            with pytest.raises(dc.WriteDeniedError, match="capped by what you hold"):
+                store.commit()
+            store.discard()
+
+    def test_agent_cannot_grant_into_a_group_it_lacks(self, store):
+        with store.acting_as(ROOT):
+            store.store(dc.Actor(uid=900, display="bot", human=True,
+                                 memberships={TEAM: dc.CURATOR}))
+            store.commit()
+        with store.acting_as(900):
+            # CURATOR in TEAM, but no standing in ORG — cannot grant there at all.
+            store.store(dc.Actor(uid=901, display="cross", human=True,
+                                 memberships={ORG: dc.VIEWER}))
+            with pytest.raises(dc.WriteDeniedError):
+                store.commit()
+            store.discard()
+
+    def test_curator_may_onboard_a_bot_within_its_own_group(self, store):
+        # Bounded delegation: grant ≤ what you hold, no break-glass needed.
+        with store.acting_as(ROOT):
+            store.store(dc.Actor(uid=2, display="Anna", human=True,
+                                 memberships={TEAM: dc.CURATOR}))
+            store.commit()
+        with store.acting_as(2):
+            store.store(dc.Actor(uid=900, display="bot", human=False, sponsor=2,
+                                 memberships={TEAM: dc.AGENT}))     # AGENT ≤ CURATOR
+            store.commit()
+        with store.acting_as(900) as bot:
+            assert bot.memberships == {TEAM: dc.AGENT}
+
+    def test_relevel_is_ceiling_checked_but_unchanged_hats_pass(self, store):
+        with store.acting_as(ROOT):
+            store.store(dc.Actor(uid=2, display="Anna", human=True,
+                                 memberships={TEAM: dc.CURATOR, ORG: dc.STAFF}))
+            store.commit()
+        with store.acting_as(2):                       # CURATOR in TEAM, STAFF in ORG
+            # Anna registers (and so owns → can read) the bot within her ceiling.
+            store.store(dc.Actor(uid=900, display="bot", human=True,
+                                 memberships={TEAM: dc.AGENT, ORG: dc.STAFF}))
+            store.commit()
+            bot = store.get(dc.Actor, uid=900)
+            bot.memberships[TEAM] = dc.STAFF           # raise within her ceiling: ok
+            store.commit()                             # ORG:STAFF unchanged — never re-checked
+            assert store.get(dc.Actor, uid=900).memberships[TEAM] == dc.STAFF
+            bot = store.get(dc.Actor, uid=900)
+            bot.memberships[TEAM] = dc.ADMIN           # above her CURATOR
+            with pytest.raises(dc.WriteDeniedError, match="capped by what you hold"):
+                store.commit()
+            store.discard()
+
+    def test_minting_denial_is_gapless(self, store):
+        with store.acting_as(ROOT):
+            store.store(dc.Actor(uid=900, display="bot", human=True,
+                                 memberships={TEAM: dc.AGENT}))
+            store.commit()
+        before = store.last_tid
+        with store.acting_as(900):
+            store.store(dc.Actor(uid=999, display="evil", human=True,
+                                 memberships={dc.WORLD: dc.EXECUTIVE}))
+            with pytest.raises(dc.WriteDeniedError):
+                store.commit()
+            store.discard()
+        with store.acting_as(ROOT):                    # next real commit is contiguous
+            store.store(dc.Actor(uid=901, display="fine", human=True,
+                                 memberships={TEAM: dc.AGENT}))
+            store.commit()
+        assert store.last_tid == before + 1
+
+
+class TestBirthOwnerPin:
+    """F2 (ADR-008 R6, 2026-07-16): a new record's owner is the acting
+    principal's uid, stamped by the engine — never assigned by hand. The
+    persisted branch already pinned ownership; this closes the birth asymmetry.
+    """
+
+    def test_cannot_forge_a_victim_owner_at_birth(self, store):
+        with store.acting_as(AGENT_900):
+            c = Contact(name="planted")
+            store.store(c)
+            c._dc_owner = 2                             # claim OWNER_STAFF owns it
+            with pytest.raises(dc.WriteDeniedError, match="owner is the acting"):
+                store.commit()
+            store.discard()
+
+    def test_cannot_forge_a_nobody_owner_at_birth(self, store):
+        with store.acting_as(AGENT_900):
+            c = Contact(name="orphan")
+            store.store(c)
+            c._dc_owner = 0                             # would be an unreachable orphan
+            with pytest.raises(dc.WriteDeniedError):
+                store.commit()
+            store.discard()
+
+    def test_honest_birth_still_stamps_the_actor(self, store):
+        with store.acting_as(AGENT_900):
+            c = Contact(name="honest")
+            store.store(c)
+            store.commit()
+            assert c.dc_permissions.owner == AGENT_900.uid
+
+
+class TestOwnerBoostIsUnsharedOnly:
+    """F3 (ADR-008 amendment 2026-07-16): the owner's personal-best boost
+    applies only to an UNSHARED record. Once shared, authority must come
+    through a group it is shared into — an owner's level in an unrelated
+    compartment must not clear a curated write floor.
+    """
+
+    def test_unrelated_hat_does_not_clear_a_curated_floor(self, store):
+        # Two owners identical but for a hat in an unrelated group (ORG).
+        boosted = dc.Principal(uid=20, memberships={TEAM: dc.AGENT, ORG: dc.CURATOR})
+        control = dc.Principal(uid=21, memberships={TEAM: dc.AGENT})
+        for who in (boosted, control):
+            with store.acting_as(who):
+                c = Contact(name=f"draft-{who.uid}")
+                store.store(c)
+                dc.share(c, TEAM, read=dc.VIEWER, write=dc.AGENT)
+                store.commit()
+            with store.acting_as(CURATOR):
+                dc.protect(store.get(Contact, name=f"draft-{who.uid}"), write=dc.CURATOR)
+                store.commit()
+            with store.acting_as(who):
+                c = store.get(Contact, name=f"draft-{who.uid}")
+                c.org = "overwritten"
+                with pytest.raises(dc.WriteDeniedError, match="curation guarantee"):
+                    store.commit()                     # BOTH denied — no laundering
+                store.discard()
+
+    def test_owner_of_an_unshared_draft_can_still_ratchet_it(self, store):
+        # The boost's legitimate purpose survives: an owner writes/ratchets a
+        # record nobody else can see (groups=∅).
+        owner = dc.Principal(uid=22, memberships={ORG: dc.CURATOR})
+        with store.acting_as(owner):
+            c = Contact(name="private")                # owner-only, no groups
+            store.store(c)
+            store.commit()
+            c.org = "edited"                           # owner-boost still applies
+            dc.protect(c, write=dc.CURATOR)            # ratchet within personal best
+            store.commit()
+            assert store.get(Contact, name="private").org == "edited"
+
+
 class TestDenialMechanics:
     def test_gapless_tid_and_intact_buffer(self, store):
         c = _curated_contact(store)

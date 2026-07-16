@@ -14,8 +14,11 @@ import datacrystal as dc
 ORG, TEAM = 1, 2
 
 # Actor is protected since W2 (ADR-008): registering actors needs a
-# non-anonymous session — the config-trusted bootstrap principal.
-BOOT = dc.Principal(uid=1)
+# non-anonymous session. Since W5 (F1) an Actor's memberships are
+# authority-ceiling-checked, so the config-trusted bootstrap that seeds the
+# registry is ROOT — "whoever syncs the registry" is app-side trust
+# (ADR-008:200); only root may mint authority it does not itself hold.
+BOOT = dc.root_principal(1)
 
 
 def _registry(store):

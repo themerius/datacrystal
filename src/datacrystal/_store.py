@@ -1589,6 +1589,21 @@ class Store:
         values = decode_payload(rec.payload)
         return (values[pos[0]], list(values[pos[1]]), values[pos[2]], values[pos[3]])
 
+    def _prior_actor_memberships(self, rec: StoredRecord) -> dict[int, int]:
+        """The prior ``Actor.memberships`` map from a persisted payload —
+        decode-level (constructs no entity), for the F1 re-level ceiling so a
+        membership left UNCHANGED never needs re-clearing (ADR-008 R8). A cid
+        whose shape predates the field decodes as ``{}`` (every entry then
+        reads as newly granted, which only ever fails safe — stricter).
+        """
+        persisted = self._persisted_fields.get(rec.cid, [])
+        try:
+            idx = persisted.index("memberships")
+        except ValueError:
+            return {}
+        raw = decode_payload(rec.payload)[idx]
+        return {int(g): int(lvl) for g, lvl in dict(raw).items()}
+
     def _check_write_gate(
         self,
         prot_pending: list[tuple[int, Any, TypeInfo]],
@@ -1640,6 +1655,17 @@ class Store:
                          "anonymous principal (a record nobody owns must not "
                          "exist, R6/R7a)")
                 base = self._birth_labels.get(oid, (obj._dc_owner, [], VIEWER, VIEWER))
+                if obj._dc_owner != base[0]:
+                    # F2 (ADR-008 R6, 2026-07-16): the birth owner is the acting
+                    # principal's uid, stamped in _stamp_perm_labels. Setting
+                    # `_dc_owner` between store() and commit() would forge it —
+                    # planting a record in a victim's owner-only space, or an
+                    # unreachable owner=0 orphan. The persisted branch already
+                    # pins ownership (R8 amendment); this pins it at birth too,
+                    # closing the create/persist asymmetry.
+                    deny(f"cannot stamp {ti.cls.__name__} oid={oid} with owner "
+                         f"{obj._dc_owner}: a new record's owner is the acting "
+                         f"principal ({base[0]}), never assigned by hand (R6)")
             else:
                 held = authority_towards(p, prior[0], prior[1])
                 if held < prior[3]:
@@ -1677,6 +1703,27 @@ class Store:
                          f"floor to {staged}: your own authority towards the "
                          f"record is {ceiling} (R8 ceiling — a label write is "
                          "a write, bounded by what you hold)")
+            if ti.cls is Actor:
+                # F1 (ADR-008 R8, 2026-07-16): an Actor's `memberships` IS
+                # authority — acting_as(uid) turns a stored level into a live
+                # Principal. The generic new-record branch has no floor to
+                # clear, so without this a lowly writer could mint itself an
+                # Actor(memberships={WORLD: EXECUTIVE}) and acting_as() into
+                # root. The R8 ceiling extended to authority-bearing birth AND
+                # re-level: every CHANGED membership must be ≤ the level the
+                # committer holds in that group. Minting WORLD:EXECUTIVE thus
+                # needs the committer to already hold it — i.e. be root (which
+                # short-circuited at the top). Lowering/removing never blocks;
+                # a curator can still onboard a bot inside their own group.
+                prior_m = (self._prior_actor_memberships(records[oid])
+                           if prior is not None else {})
+                for g, lvl in obj.memberships.items():
+                    if lvl != prior_m.get(g) and lvl > level(p, g):
+                        deny(f"cannot grant Actor uid={obj.uid} level {lvl} in "
+                             f"group {g}: your own level there is {level(p, g)} "
+                             "— an Actor's memberships are authority, capped by "
+                             "what you hold (R8 ceiling on authority-bearing "
+                             "grants; only root may mint root)")
         for oid, ti in prot_deletes:
             owner, groups, _read, write_floor = labels[oid]
             held = authority_towards(p, owner, groups)
