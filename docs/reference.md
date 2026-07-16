@@ -424,8 +424,9 @@ the bytes go **out-of-line, raw**, in a sibling `blobs` table, and the record ke
 - **On a `protected=True` class:** `store.open_blob()` rides the same masked-deref checkpoint as
   every other field — you need a live (non-`dc.Redacted`) entity in hand to call it, and a twin's
   field access raises `ReadDeniedError` same as any other field (ADR-008). `snapshot.open_blob()`
-  does **not** enforce the read floor yet — snapshot-layer permissions are `[planned — W4]`, see
-  [Snapshots](#snapshots).
+  enforces the read floor too (W4-3): it raises `ReadDeniedError` for a principal who cannot read
+  the owning record, and a held `dc.BlobHandle.bytes()` re-gates under the current principal — a
+  blob is readable iff its owning record is. See [Snapshots](#snapshots).
 
 The full mechanics, the streamed-write rules, and *when to reach for a `Blob` entity + `dc.Lazy`
 instead* live in [the blobs how-to](how-to/blobs.md). See
@@ -721,12 +722,17 @@ store.commit()                             # stamped: actor=1
   principals are **deferred beyond this campaign** (ADR-008 R16: contributions keep
   stamping anonymous; the coordinator refuses protected-class batches pre-flight until
   followers carry their own identity).
-- W1 shipped **identity + stamps**; enforcement followed in two waves and is **live on
-  the store today**: the W2 write-floor gate (below) fences every commit, and the W3
+- W1 shipped **identity + stamps**; enforcement followed in waves and is now **live on
+  every per-record read surface**: the W2 write-floor gate (below) fences every commit, the W3
   read floor (see [Protecting records](#protecting-records-protectedtrue)) filters
-  every live-store discovery surface and masks every deref. What's still
-  `[planned — W4]`: `Snapshot`/GraphQL/web reads, FTS post-filtering, and
-  `Snapshot.index_bitmaps()`'s refusal (see [Snapshots](#snapshots)).
+  every live-store discovery surface and masks every deref, and W4 extends the same fence to
+  `Snapshot`, the `datacrystal[web]` REST/GraphQL surfaces, `datacrystal[fts]` post-filtering,
+  blobs, and `Snapshot.index_bitmaps()`'s refusal on protected classes (see [Snapshots](#snapshots)).
+  What remains **outside** the row fence, by design, are the full-copy protected *outputs* — the
+  Arrow parquet mirror, the retained delta log, the federation `/v1/deltas` stream, and
+  `Snapshot._stream` — protected by root-binding + filesystem placement, not the per-record floor
+  (a mirror of protected data is protected data; see
+  [the permissions how-to](how-to/permissions.md#what-the-fence-does-and-does-not-cover)).
 
 ## Protecting records (`protected=True`)
 
@@ -766,12 +772,13 @@ class Contact:
   `dc.Actor` registry is itself protected under exactly this rule.
 - `upsert()` **never merges label columns** — an ETL probe instance's birth defaults
   cannot reset a survivor's curated labels (`/v1/submit` rides upsert).
-- `upsert()`'s natural-key lookup is **read-unfenced by design** (ADR-008 W3-3): a
-  filtered lookup would duplicate-then-collide instead of merging. Accepted
-  consequence — a probe with a key that already belongs to a record you could not
-  `get()` still returns that record as the survivor (an existence-plus-data exposure
-  on this one write surface); the commit gate still fences the actual write, so
-  nothing is persisted without authority.
+- `upsert()`'s natural-key **lookup** is read-unfenced by design (ADR-008 W3-3): a
+  filtered lookup would duplicate-then-collide instead of merging. Its **return** is
+  fenced (W4-6): a probe whose key already belongs to a committed record the acting
+  principal cannot `get()` is **denied with `ReadDeniedError`** — upsert is a
+  read-modify-write and fails closed on an unreadable survivor (only its owner or root
+  may upsert it). The commit gate still fences the merge for a readable survivor, and
+  dedup is unaffected (the lookup still finds the row).
 - **The label verbs** stage changes through normal dirty-tracking and commit with
   everything else — they check no authority themselves (stage-now-reject-at-commit is
   what makes the maker–checker flow work; the commit gate rules against the
@@ -868,17 +875,22 @@ def report(store: dc.Store) -> int:        # runs on any thread
         return snap.count((S.quality == "fine") & (S.mass_g >= 100.0))
 ```
 
-- **Permissions honesty note:** the ADR-008 read floor is `[planned — W4]` on every
-  snapshot surface — `snap.get`/`snap.all`/`snap.get_many`/`snap.query`/`snap.count`/
-  `snap.incoming`/`snap.open_blob` decode a protected record's fields (including the
-  four `_dc_*` label columns) exactly like an unprotected one today; nothing is masked
-  or filtered yet. R15 (adopted default) already fixes the shape enforcement will take
-  — a snapshot binds the principal in effect at `snapshot()` time — but the readable-set
-  overlay over the shared per-watermark indexes has not landed. `snap.index_bitmaps()`
-  will additionally **raise on protected classes once W4 lands** (R12: raw postings leak
-  existence *and* label structure, so this one surface refuses rather than half-filters).
-  Until then, do not call `store.snapshot()`/GraphQL/REST reads on a store holding
-  protected data from a principal that should not see it all.
+- **Permissions (W4 — enforced):** a snapshot is **principal-bound and fenced**. `store.snapshot()`
+  binds the principal in effect at `snapshot()` time (or pass `principal=` explicitly; ADR-008 R15),
+  and `snapshot.for_principal(p)` derives an O(1) sibling that enforces its *own* principal over the
+  shared per-watermark core. Every read surface honors the read floor: `snap.query`/`snap.count`/
+  `snap.all`/`snap.explain`/`snap.incoming` intersect the principal's readable set before any
+  window/hydration (a denied row is simply absent); `snap.get` raises `ReadDeniedError` on a denied
+  row while `snap.get_many` returns a `dc.Redacted` twin in that slot (identity readable, field
+  access raises); `snap.open_blob` is fenced with its owning record (W4-3). `snap.index_bitmaps()`
+  **raises `ReadDeniedError` on a protected class** — even for root — because value-keyed postings
+  leak existence *and* label structure, so this one surface refuses rather than half-filters (R12);
+  it still serves unprotected classes. A persisted `_dc_*` lineage whose live class was removed
+  **fails closed** for a non-root principal (no class ⇒ no readable bitmap to compile), while root
+  still runs the ops-dump (R9). The one surface that is *not* the row fence is `snap._stream` (the
+  private mirror-bootstrap iterator): it requires a **root-bound** snapshot for a protected class —
+  a non-root snapshot would build a silently partial mirror — one of the full-copy protected outputs
+  documented in [the permissions how-to](how-to/permissions.md#what-the-fence-does-and-does-not-cover).
 - `snap.get(oid_or_ref)`, `snap.all(EntityClass)` and `snap.root` return **immutable
   views** (`dc.EntityView`): field access mirrors the live class, entity references are
   explicit `dc.Ref` tokens you resolve via `snap.get(ref)`, lists come back as tuples,
@@ -976,10 +988,13 @@ from datacrystal.web import (
   closes it on shutdown via the lifespan. **`store_lifespan`** is the underlying lifespan if you
   build the app yourself.
 - **`read_snapshot`** — a dependency yielding a per-request, per-watermark pooled `dc.Snapshot`
-  (any thread); a read route reads `EntityView`s / DTOs off it, never live entities. REST and
-  GraphQL reads both ride this snapshot pool, so they inherit its permissions honesty note
-  above: the ADR-008 read floor is `[planned — W4]` here — a protected record's fields decode
-  unmasked over the wire today (see [Snapshots](#snapshots)).
+  (any thread), **bound to the request's principal** (`get_principal`, below); a read route reads
+  `EntityView`s / DTOs off it, never live entities. REST and GraphQL reads both ride this snapshot
+  pool, so they inherit its read fence (W4-4): a protected row the principal cannot read is filtered
+  from discovery and a denied reference projects to **wire-null** (no 500, no existence leak), and no
+  `_dc_*` column ever reaches the wire (reflection drops them). Distinct request principals at one
+  watermark share the *same* pooled core — the index is built once per commit, never per principal
+  or per request (R15). See the [Snapshots](#snapshots) permissions note.
 - **`submit_write`** — a dependency yielding an awaitable that ships a closure to the owner
   thread (via `store.submit()`); the mutation **and** commit run on the owner and `await write(fn)`
   resolves only once durable. Return plain data from the closure — a live entity raises

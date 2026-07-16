@@ -208,11 +208,26 @@ below). What native permissions *do* buy: confused-deputy protection (an agent c
 see or overwrite a record it has no standing on), correct multi-principal behavior across every
 existing surface (the web extra, followers, background agents), and a native, stamped audit trail
 — every commit records *who*, in the delta log (see
-[the commit-delta pipeline](reference.md#the-commit-delta-pipeline)). And **a mirror of protected
-data is protected data**: the FTS sidecar's SQLite tables and the Arrow mirror's parquet segments
-hold the plaintext of whatever they index, unmasked, on disk today; read-floor enforcement on those
-mirrors — and on snapshots, and the web/GraphQL surfaces built on snapshots — is `[planned — W4]`
-(the honesty notes live with each surface: [Snapshots](reference.md#snapshots),
+[the commit-delta pipeline](reference.md#the-commit-delta-pipeline)).
+
+The fence is **enforcement in-band, not a cryptographic perimeter.** The engine reads the label and
+answers the read; there is no key, and root is a deliberate, *stamped* break-glass — a principal
+holding `EXECUTIVE` in the `WORLD` group sees and can fix everything, and every root action is still
+recorded under its uid in the delta log (visible, never silent). As of W4 the read floor is live on
+every **per-record** read surface — the live store, snapshots, the `datacrystal[web]` REST/GraphQL
+tier, `datacrystal[fts]` ranked hits, and blobs — proved end-to-end by one protected record run
+through the whole matrix in `tests/extras/test_read_fence_capstone.py`.
+
+But **a mirror of protected data is protected data**, and the fence is a per-row check, not a spell
+over bytes: any surface that emits a **full plaintext copy** carries that plaintext regardless of the
+floor. The `datacrystal[fts]` sidecar's SQLite tables, the `datacrystal[arrow]` mirror's parquet
+segments, the retained delta log, and the federation `/v1/deltas` change-feed each hold the records
+they mirror in the clear on disk. These are protected not by the row floor but by **placement** —
+they are built or streamed under the audited store root, inside the same filesystem perimeter that
+already governs the `.store` file — plus **root-binding** where a copy is bootstrapped in-process
+(`Snapshot._stream` and the mirror bootstraps require a root snapshot for a protected class, so a
+non-root reader can never build even a *partial* copy). The honesty notes live with each surface
+([Snapshots](reference.md#snapshots), [the permissions how-to](how-to/permissions.md#what-the-fence-does-and-does-not-cover),
 [the search how-to](how-to/search.md)). Treat the labels as an internal contract your own
 application code respects by construction, not a perimeter — the perimeter is still whatever
 controls access to the store's files.
