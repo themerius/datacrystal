@@ -371,6 +371,68 @@ def test_snapshot_open_read(big_store) -> None:
          engine / floor, 25.0)
 
 
+def test_read_fence_discovery_overhead(tmp_path) -> None:
+    """ADR-008 W4 read-fence discovery gate: a principal-bound discovery query
+    over a PROTECTED class stays ≤ 2.0× the same query over its UNPROTECTED twin,
+    same-run.
+
+    This is the read-side counterpart of ``commit_gate_overhead`` (the write
+    gate). It measures the *realistic* hot path a ``datacrystal[web]`` read pays:
+    a fresh ``store.snapshot(principal=…)`` per request, one discovery
+    ``query``, close. On a protected class the snapshot must compile the
+    principal's readable bitmap (O(extent), once per snapshot — R15) and
+    intersect it before window/hydration; on an unprotected class the fence is
+    structurally skipped (zero cost — fitness ``test_permission_zero_cost``). The
+    same-run ratio isolates exactly that readable-set compile+intersect.
+
+    Apples-to-apples: ``_gen.CuratedSpecimen`` is ``Specimen``'s protected twin
+    — the identical five fields under the identical rng, differing only in the
+    four injected ``_dc_`` columns — so both stores hold the same shape and the
+    same ~1% predicate selects the SAME candidate count (asserted below). A
+    non-root CURATOR owner reads its own records, so the filtered result set
+    equals the unfiltered one; only the fence work differs.
+
+    Budget: the readable bitmap is one O(extent) pass building a pyroaring
+    bitmap, then one bitmap-AND per query — the same order as the query's own
+    candidate bitmap build, so the principal-bound open pays ≈ one extra bitmap's
+    worth on top of the unprotected open+query. Ratio ≤ 2.0 (observed ≈ 1.3×;
+    warn-stage, hardens via ``DC_BENCH_STRICT`` after 14 green nights)."""
+    n = 5000
+    owner = dc.Principal(uid=1001, memberships={dc.WORLD: dc.CURATOR})
+
+    prot_store = dc.Store.open(tmp_path / "fence_prot.store", principal=owner)
+    _gen.build(prot_store, specimens=n, protected=True)
+    plain_store = dc.Store.open(tmp_path / "fence_plain.store")
+    _gen.build(plain_store, specimens=n, protected=False)
+
+    prot_pred = (_gen.CuratedSpecimen.quality == "A") & (_gen.CuratedSpecimen.mass_g >= 100.0)
+    plain_pred = (_gen.Specimen.quality == "A") & (_gen.Specimen.mass_g >= 100.0)
+
+    # Equal candidate counts ⇒ the ratio is pure fence overhead, not a different
+    # amount of query work (a non-root owner reads all its own protected rows).
+    with prot_store.snapshot(principal=owner) as ps, plain_store.snapshot() as us:
+        n_prot, n_plain = ps.count(prot_pred), us.count(plain_pred)
+    assert n_prot == n_plain > 0, f"predicate shape drifted: {n_prot} vs {n_plain}"
+
+    def filtered_run() -> None:
+        # the protected, principal-bound discovery path: snapshot compiles the
+        # readable set, intersects it before the window (ADR-008 W4)
+        with prot_store.snapshot(principal=owner) as snap:
+            snap.query(prot_pred)
+
+    def unfiltered_run() -> None:
+        # the unprotected twin: no fence, snapshot open + query only
+        with plain_store.snapshot() as snap:
+            snap.query(plain_pred)
+
+    t_filtered = time_it(filtered_run, rounds=5)
+    t_unfiltered = time_it(unfiltered_run, rounds=5)
+    gate("read_fence_discovery (protected principal-bound / unprotected query)",
+         t_filtered / t_unfiltered, 2.0)
+    prot_store.close()
+    plain_store.close()
+
+
 def test_commit_gate_overhead(tmp_path) -> None:
     """KICKOFF ``commit_gate_overhead`` (ADR-008 W2-9): a protected-class
     UPDATE commit stays ≤ 2.0× its unprotected twin, same-run.

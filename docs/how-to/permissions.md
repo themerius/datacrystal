@@ -116,13 +116,53 @@ Root introduces no new API — it is a property of the principal's memberships (
 legible sugar over that pair) — and every root action is still stamped in the delta log under the
 root actor's uid: break-glass is visible, never silent.
 
-## What is not fenced yet
+## What the fence does and does not cover
 
-Permissions enforce on the **live store** today (everything on this page). `store.snapshot()`, the
-`datacrystal[web]` REST/GraphQL surfaces (which read through snapshots), and the `datacrystal[fts]`
-sidecar's ranked hits do **not** filter yet; and `Snapshot.index_bitmaps()` does not yet fail closed —
-per R12 it will **raise** on protected classes (no honest post-filter of value-keyed postings exists),
-but today it returns raw postings. See the honesty notes
-in [Snapshots](../reference.md#snapshots) and [Full-text search](search.md). Do not point a
-snapshot-backed reader at protected data from a principal that should not see all of it until
-those land (the campaign milestone tracks it as W4).
+The read fence is **live on every per-record read surface** as of W4 — the campaign is complete:
+
+- the **live store** — `get`, `get_many`, `query`, `query_iter`, `count`, `pluck`, `explain`,
+  `incoming` (denied ≡ absent), and every deref (`Lazy.get()` / a held OID → a masked twin);
+- **snapshots** — `store.snapshot(principal=…)` binds one acting principal (ADR-008 R15) and fences
+  the same surfaces: `snap.get` raises `ReadDeniedError` on a denied row, `snap.get_many` hands back
+  a redacted twin, `query`/`count`/`all`/`explain`/`incoming` filter, and `snap.index_bitmaps()`
+  **raises** on a protected class (value-keyed postings leak existence *and* structure, so this one
+  surface refuses rather than half-filters);
+- the **`datacrystal[web]`** REST *and* GraphQL surfaces — each request is fenced by its resolved
+  principal (a denied reference renders wire-null, no existence leak, and no `_dc_*` column ever
+  reaches the wire);
+- the **`datacrystal[fts]`** sidecar — `search(query, snapshot=…)` post-filters ranked hits against
+  the snapshot's readable set, and an index covering a protected class **refuses** an unfenced
+  `search()` (no snapshot) rather than reading with full visibility;
+- **blobs** — `store.open_blob`, `snapshot.open_blob`, and a held `BlobHandle.bytes()` all re-gate
+  under the current principal (a blob is readable iff its owning record is).
+
+The whole matrix is proved end-to-end in `tests/extras/test_read_fence_capstone.py`: one protected
+record, every surface above, a reader with no standing sees nothing through any of them while the
+owner and root see it through all — so a future surface that forgets the fence fails there by
+construction.
+
+### What is not the per-record fence — the full-copy protected outputs
+
+Some surfaces emit a **full plaintext copy** of the records they mirror rather than answering a
+per-record read. These are **not** fenced by the row-level floor — and by design cannot be, because
+a mirror of protected data *is* protected data (the "[this is not cryptography](../explanation.md#permissions-read-floors-write-floors-and-the-masked-deref)"
+doctrine): the label is an in-band contract, not encryption, so a bulk copy carries the plaintext
+regardless. They are protected instead by **placement + root-binding**: each is built or streamed
+under the audited store root and lives inside the same filesystem perimeter that already governs the
+`.store` file.
+
+- the **`datacrystal[arrow]`** parquet mirror — `ArrowMirror` writes the columnar plaintext of the
+  types it mirrors to segment files under the store root;
+- the **retained delta log** — the COMMIT-DELTA stream on disk holds every record's payload, by
+  construction (it *is* the write-ahead history);
+- the **federation `/v1/deltas`** change-feed — a coordinator streams raw deltas to followers; the
+  coordinator refuses protected-class batches to anonymous followers pre-flight (ADR-008 R16), but
+  the stream itself is a full copy, not a per-row read;
+- **`Snapshot._stream`** — the private mirror-bootstrap iterator a sidecar consumer replays to build
+  its own copy; it **requires a root-bound snapshot** for a protected class (a non-root snapshot
+  would build a silently *partial* mirror, which is worse than none) and fails closed otherwise.
+
+The rule of thumb: a **per-record read** (does *this* principal get *this* row?) is fenced; a
+**bulk copy** built under the store root is protected by the perimeter, root-binding, and the audit
+trail — never by the row floor. Treat the labels as an internal contract your application code
+respects by construction, not a cryptographic boundary.
