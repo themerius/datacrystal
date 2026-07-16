@@ -1,6 +1,6 @@
 [project]
 name = "datacrystal"
-version = "0.8.0"
+version = "0.9.0"
 description = "Embedded object-graph database for Python — your live objects, crystallized: transparent, pickle-free persistence with built-in queries, full-text/vector search, and zero-copy Arrow analytics"
 readme = "README.md"
 license = "MIT"

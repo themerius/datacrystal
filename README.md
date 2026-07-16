@@ -1,7 +1,7 @@
 # datacrystal
 
 [![ci](https://github.com/semanticworks-gmbh/datacrystal/actions/workflows/ci.yml/badge.svg)](https://github.com/semanticworks-gmbh/datacrystal/actions/workflows/ci.yml)
-[![version](https://img.shields.io/badge/version-0.8.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.9.0-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.14-blue)](.python-version)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -135,15 +135,15 @@ from GitHub:
 
 ```bash
 # add it to your project (uv) — pin a release tag…
-uv add "datacrystal @ git+https://github.com/semanticworks-gmbh/datacrystal@v0.8.0"
+uv add "datacrystal @ git+https://github.com/semanticworks-gmbh/datacrystal@v0.9.0"
 # …or track main
 uv add "datacrystal @ git+https://github.com/semanticworks-gmbh/datacrystal@main"
 
 # pip works the same way
-pip install "datacrystal @ git+https://github.com/semanticworks-gmbh/datacrystal@v0.8.0"
+pip install "datacrystal @ git+https://github.com/semanticworks-gmbh/datacrystal@v0.9.0"
 
 # need an extra? name it in the brackets
-uv add "datacrystal[web] @ git+https://github.com/semanticworks-gmbh/datacrystal@v0.8.0"
+uv add "datacrystal[web] @ git+https://github.com/semanticworks-gmbh/datacrystal@v0.9.0"
 ```
 
 The example at the top is a complete program — run it twice and the data is still there.
@@ -182,5 +182,5 @@ datacrystal is maintained solo by Sven Hodapp; issues and small focused PRs are 
 [docs/design/ROADMAP.md](docs/design/ROADMAP.md) for what is in and out of scope (the *Punted*
 and *Never* lists). Per-release changes live in the [CHANGELOG](CHANGELOG.md).
 
-Status: **0.8.0** — the API froze at the v0.1.0 baseline; v0.2–0.8 are purely additive.
+Status: **0.9.0** — the API froze at the v0.1.0 baseline; v0.2–0.9 are purely additive.
 PyPI publication deferred (names reserved). License: [MIT](LICENSE).

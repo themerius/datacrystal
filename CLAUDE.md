@@ -5,7 +5,7 @@ objects ARE the database; pickle-free msgpack records, roaring-bitmap queries, S
 durability, and four released-shape extras: `datacrystal[fts]` (FTS5 + Snowball),
 `datacrystal[arrow]` (persistent parquet mirrors), `datacrystal[web]` (FastAPI/Pydantic +
 Strawberry GraphQL), and `datacrystal[follower]` (fractal followers). Solo maintainer: Sven Hodapp. Version
-`0.8.0` — v0.1.0 was the **API-freeze baseline (2026-06-13)**; v0.2–0.8 ship a purely
+`0.9.0` — v0.1.0 was the **API-freeze baseline (2026-06-13)**; v0.2–0.8 ship a purely
 **additive surface** (the v0.1.0 freeze is never broken): **0.2** = query ergonomics
 (multi-valued list index, `limit`/`offset` + `query_iter`, `RenamedFrom`, streaming
 `ArrowMirror.bootstrap`, iterative graph read-path + `list[Lazy]` adjacency, `store.incoming()`);
