@@ -1088,15 +1088,16 @@ class Store:
         — a duplicate there stays what it always was: a loud
         ``UniqueViolationError`` from ``commit()``.
 
-        On a ``protected=True`` class the natural-key lookup is READ-
-        UNFENCED by design (ADR-008 W3-3): a filtered lookup would
-        duplicate-then-collide instead of merging. Accepted consequence —
-        ``upsert()`` can therefore RETURN a survivor instance the calling
-        principal could not have ``get()``-ed, an existence-plus-data
-        exposure on this one write surface. The commit gate still fences
-        the merge (the write floor applies as always), so nothing is
-        actually written without authority; only the returned READ is
-        broader than the discovery surfaces.
+        On a ``protected=True`` class the natural-key LOOKUP is read-
+        unfenced by design (ADR-008 W3-3): a filtered lookup would
+        duplicate-then-collide instead of merging. The RETURN, however, is
+        fenced (W4-6): a committed survivor the acting principal cannot
+        ``get()`` is denied with ``ReadDeniedError`` — upsert is a read-
+        modify-write, so it fails closed on an unreadable survivor rather
+        than handing it back (only its owner or root may upsert it). The
+        commit gate still fences the merge for a readable survivor (the
+        write floor applies as always); dedup is unaffected because the
+        lookup still finds the row.
 
         Raises:
             NotAnEntityError: ``obj`` is not an ``@entity`` class instance.
@@ -1107,8 +1108,11 @@ class Store:
             UniqueViolationError: ``obj``'s key already belongs to another
                 entity and ``obj`` is itself registered with the store —
                 upsert a fresh (untracked) instance or the canonical one.
-            ReadDeniedError: ``obj`` is a ``dc.Redacted`` twin — a denied
-                deref result is never committable (ADR-008 R14).
+            ReadDeniedError: ``obj`` is a ``dc.Redacted`` twin (a denied
+                deref result is never committable, ADR-008 R14), OR the
+                natural key already belongs to a committed record the acting
+                principal cannot read (upsert fails closed on an unreadable
+                survivor, W4-6).
             WrongThreadError: called from a thread other than the store's
                 owner (ADR-001).
             StoreClosedError: the store has already been closed.
@@ -1196,10 +1200,26 @@ class Store:
             ci = self._index.ensure(ti)
             oid = ci.unique[field].get(value)
             if oid is not None and oid not in self._deleted:
-                # read-enforcement bypass BY DESIGN (ADR-008 W3-3): a
+                # The LOOKUP is read-unfenced BY DESIGN (ADR-008 W3-3): a
                 # filtered lookup would duplicate-then-collide
-                # (UniqueViolationError at commit); the write gate is the
-                # fence for the merge.
+                # (UniqueViolationError at commit). But the RETURN is fenced
+                # (W4-6, closing W3-3's accepted exposure): upsert is a
+                # read-modify-write, so a committed survivor the acting
+                # principal cannot READ is denied — never handed back — failing
+                # closed on absent labels too (a committed oid always has them).
+                # Dedup is unaffected: the lookup still found the row, and the
+                # write gate still fences the merge for a readable survivor.
+                if ti.protected and not is_root(self.principal):
+                    labels = ci.committed_labels(oid)
+                    if labels is None or not can_read_row(self.principal, *labels):
+                        raise ReadDeniedError(
+                            f"upsert of {ti.cls.__name__} ({field}={value!r}) is "
+                            "denied: a record with that natural key exists but is "
+                            "not readable by the current principal. upsert is a "
+                            "read-modify-write, so it fails closed on an "
+                            "unreadable survivor (ADR-008 W4-6, closing the W3-3 "
+                            "exposure) — only its owner or root may upsert it."
+                        )
                 return self._load_oid(oid)
         pending = self._pending_upserts.get((ti.cls, field, value))
         if pending is not None:
