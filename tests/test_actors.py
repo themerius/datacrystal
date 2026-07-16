@@ -13,7 +13,10 @@ import datacrystal as dc
 
 # The bootstrap identity: whoever opens the store registers the first actors
 # (ADR-008 R6 — the anonymous principal cannot create protected records).
-BOOT = dc.Principal(uid=1)
+# Since W5 (F1) minting an Actor is bounded by the registrar's own authority
+# (memberships ARE authority), so the config-trusted bootstrap is ROOT — the
+# "whoever syncs the registry" app-side trust of ADR-008:200.
+BOOT = dc.root_principal(1)
 
 
 class TestLadder:

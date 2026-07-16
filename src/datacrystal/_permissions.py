@@ -238,14 +238,25 @@ def is_owner(p: Any, owner: int) -> bool:
 
 def authority_towards(p: Any, owner: int, groups: Iterable[int]) -> int:
     """Highest level ``p`` holds in any group the record is shared with;
-    owners act at their personal-best level on their own records (ADR-008 —
-    what lets the owner of an unshared record write and ratchet it at all).
-    Pure over plain values: the commit gate calls it on decoded prior
-    tuples, the ceiling check on staged values, and W3's readable-set
-    compiler will call it per snapshot row — one predicate, three callers.
+    the owner of an UNSHARED record acts at their personal-best level on it
+    (ADR-008 — what lets an owner write and ratchet a draft nobody else can
+    see at all). Pure over plain values: the commit gate calls it on decoded
+    prior tuples, the ceiling check on staged values, and W3's readable-set
+    compiler calls it per snapshot row — one predicate, several callers.
+
+    The owner boost is gated on ``not levels`` (the record has no groups) on
+    purpose (F3 fix, ADR-008 amendment 2026-07-16). Once a record is shared,
+    authority towards it must come THROUGH a group it is shared into — the
+    owner's personal-best level in some *unrelated* compartment must not clear
+    a curated record's write floor, or the curation guarantee ("an agent can
+    never overwrite a curated record, even one it created") is false. Reads are
+    unaffected: :func:`can_read_row` short-circuits on the owner clause before
+    ever reaching here, so the boost never touched the read path. Testing
+    ``not levels`` rather than ``not groups`` is robust to a one-shot iterable
+    ``groups`` (the comprehension is the only place it is consumed).
     """
     levels = [level(p, g) for g in groups]
-    if is_owner(p, owner):
+    if is_owner(p, owner) and not levels:
         levels.append(max(p.memberships.values(), default=VIEWER))
     return max(levels, default=NO_STANDING)
 

@@ -272,6 +272,12 @@ def ingest(store: dc.Store, units: list[dict[str, str]], actors: dict[str, dict[
             if a["personenart"] == NATURAL:
                 dc.share(rec, REGISTRY, read=dc.STAFF, write=dc.CURATOR)
             else:
+                # A public org: world-READABLE, but still a registry record its
+                # curators manage — so it lives in BOTH compartments. Setting a
+                # CURATOR write floor needs curator authority IN one of the
+                # record's own groups (ADR-008 F3: no owner-boost laundering from
+                # an unrelated hat), which INGEST holds in REGISTRY.
+                dc.share(rec, REGISTRY, read=dc.VIEWER, write=dc.CURATOR)
                 dc.share(rec, dc.WORLD, read=dc.VIEWER, write=dc.CURATOR)
         live[a["nr"]] = rec
         if (i + 1) % BATCH == 0:

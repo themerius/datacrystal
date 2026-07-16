@@ -125,6 +125,22 @@ of a protected record under the **anonymous** principal (uid 0) is refused
 fail-closed at the gate — a record nobody owns must not be creatable by
 accident (consistent with R16's interim federation stance).
 
+*Amendment 2026-07-16 (W5 hardening — birth owner pin, security fix; "F2"): R6
+says a new record's owner IS the acting principal, and `_stamp_perm_labels`
+stamps exactly that — but the commit gate's new-record branch never compared
+the staged `_dc_owner` to that birth stamp, so `rec._dc_owner = victim` between
+`store()` and `commit()` persisted a forged owner (the R8-amendment pin only
+covered PERSISTED records — a create/persist asymmetry). Consequence: a writer
+plants a record in a victim's owner-only space (the owner clause as delivery
+channel, no group involved — the cross-group handoff check bypassed), or forges
+`owner = 0` for a permanently unreachable orphan. **Ruled: the birth branch
+pins ownership too** — the gate refuses a new protected record whose staged
+`_dc_owner` differs from the birth stamp (the acting principal's uid),
+`WriteDeniedError`, before the ceiling. The audit trail was never at risk (the
+COMMIT-DELTA-v2 actor stamp records the true committer regardless); this is
+label integrity. Found in the pre-merge adversarial pass over the finished
+campaign.*
+
 ### R7 · Legacy fill: read-as-before, ADMIN-write
 
 **Ruled:** when `protected=True` retrofits a class whose store already holds
@@ -183,6 +199,43 @@ break-glass chown (offboarding, orphan re-home) still works and is stamped; a
 birth stamp is unaffected (a new record's owner is the acting principal by
 construction). No transfer verb exists — ownership moves only via root until
 one is designed (additive, later).*
+
+*Amendment 2026-07-16 (W5 hardening — authority-bearing birth, CRITICAL fix;
+"F1"): the R8 ceiling bounds the floors a principal sets, but the new-record
+branch has "no floor to clear" — and one protected class stores **authority
+rather than data**. `dc.Actor.memberships` maps group→level, and
+`acting_as(uid)` turns a stored level into a live `Principal`, so minting an
+`Actor(memberships={WORLD: EXECUTIVE})` was a one-commit self-promotion to
+root for ANY principal that could write anything (the registry was read-fenced
+but write-wide-open; a birth *floor*, which R7 cites concept.md as intending,
+would NOT have closed it — floors bind existing rows, not the act of creating
+one). **Ruled: the R8 ceiling extends to authority-bearing grants** — on both
+create and re-level, every CHANGED entry of `Actor.memberships` must be ≤ the
+committing principal's own `level(p, g)` in that group. Minting `WORLD:
+EXECUTIVE` therefore requires already holding it — i.e. being root (which
+short-circuits the gate anyway); a curator may still onboard a bot within their
+own group (bounded delegation, grant ≤ what you hold); lowering or removing a
+membership never blocks. The registry bootstrap is a root action ("whoever
+syncs the registry" is app-side trust, this ruling's own §R9 note) — the
+config-trusted daemon or admin that seeds the first `Actor` rows holds root.
+Enforced Actor-specifically (the only shipped authority-bearing class); a
+general "authority-bearing field" marker is additive-later. Found in the
+pre-merge adversarial pass.*
+
+*Amendment 2026-07-16 (W5 hardening — owner boost is unshared-only; "F3"): the
+Context paragraph promises "an agent can never overwrite a curated record, even
+one it created", but `authority_towards` appended the owner's personal-best
+level across ALL groups unconditionally — so an owner holding a clearing level
+in some UNRELATED compartment cleared a curated record's write floor (control
+experiment: two owners identical but for a hat in a group the record was never
+shared into — the boosted one overwrote, the bare one was denied). The
+implementation was faithful to the ratified predicate; the predicate
+contradicted the sentence introducing it. **Ruled: fix the predicate** — the
+owner boost applies only when the record has **no groups** (is unshared),
+restoring its stated purpose (letting an owner write/ratchet a draft nobody
+else can see) while making the curation guarantee true once a record is shared.
+Reads are unaffected: `can_read_row` short-circuits on the owner clause before
+reaching `authority_towards`, so the boost never touched the read path.*
 
 ### R9 · Break-glass: EXECUTIVE in WORLD = the audited root
 
