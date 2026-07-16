@@ -18,6 +18,8 @@ resources/
 .hypothesis/
 .benchmarks/
 *.store/
+# a store born from a typo'd Store.open("memory:") — the in-memory sentinel is :memory:
+memory:/
 
 # OS noise
 .DS_Store
