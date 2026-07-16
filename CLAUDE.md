@@ -5,7 +5,7 @@ objects ARE the database; pickle-free msgpack records, roaring-bitmap queries, S
 durability, and four released-shape extras: `datacrystal[fts]` (FTS5 + Snowball),
 `datacrystal[arrow]` (persistent parquet mirrors), `datacrystal[web]` (FastAPI/Pydantic +
 Strawberry GraphQL), and `datacrystal[follower]` (fractal followers). Solo maintainer: Sven Hodapp. Version
-`0.8.0` — v0.1.0 was the **API-freeze baseline (2026-06-13)**; v0.2–0.8 ship a purely
+`0.9.0` — v0.1.0 was the **API-freeze baseline (2026-06-13)**; v0.2–0.9 ship a purely
 **additive surface** (the v0.1.0 freeze is never broken): **0.2** = query ergonomics
 (multi-valued list index, `limit`/`offset` + `query_iter`, `RenamedFrom`, streaming
 `ArrowMirror.bootstrap`, iterative graph read-path + `list[Lazy]` adjacency, `store.incoming()`);
@@ -19,7 +19,13 @@ per-watermark snapshot pool (reads O(n)/commit, not O(n)/request); **0.7** = web
 edges + datetime Index/Unique keys + the nightly 1M lane; **0.8** = fractal followers
 (`datacrystal[follower]`: `web.federation_router` over FEDERATION-WIRE-v1, core
 `Store.follower`/`open_follower` + `sync()`/`discard()`/`committing()`, OCC via prior-payload
-digest).
+digest); **0.9** = native permissions (epic #168, ADR-008): `@entity(protected=True)` records
+carrying owner/groups/floors, `dc.Principal`/`dc.Actor` + the group/level ladder
+(`VIEWER`…`EXECUTIVE`), birth-fenced labels, `dc.share`/`dc.unshare`/`dc.protect`, the write gate
+(floors bind everyone incl. the owner; the R8 ceiling caps grants incl. authority-bearing `Actor`
+mints at your own level), the read fence on every per-record surface (redacted-twin deref,
+filter-on-discovery, snapshot/web/FTS/blob), the audited `dc.root_principal` break-glass, and
+`WriteDeniedError`/`ReadDeniedError`.
 Extras are pre-tag contract validators, COMMIT-DELTA-v2 LOCKED (v1 retired 2026-07-12, no-compat
 hard cut: required `actor`/`at` stamps, exact-version consumers, pre-v2 logs recreate),
 pyright-strict CI-gated. PyPI
