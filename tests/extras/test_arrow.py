@@ -302,7 +302,7 @@ def _relic(*, protected: bool):
         "__annotations__": {"name": Annotated[str, dc.Unique], "grade": str},
         "grade": "common",
     }
-    return dc.entity(type("Relic", (), ns), protected=protected)
+    return dc.entity(type("Relic", (), ns), protected=protected)  # pyright: ignore[reportCallIssue]
 
 
 def test_flip_to_protected_promotes_labels_across_segments(store_factory,

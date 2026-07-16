@@ -537,7 +537,9 @@ def _attach_secrets(store, idx) -> tuple[int, int]:
         secret = Secret(label="secret", body="the crystal vault combination")
         store.store(secret)
         store.commit()
-    return oid_of(shared), oid_of(secret)
+    shared_oid, secret_oid = oid_of(shared), oid_of(secret)
+    assert shared_oid is not None and secret_oid is not None
+    return shared_oid, secret_oid
 
 
 def test_no_snapshot_over_protected_raises(tmp_path) -> None:

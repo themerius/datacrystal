@@ -411,19 +411,19 @@ def test_read_fence_discovery_overhead(tmp_path) -> None:
     # Equal candidate counts ⇒ the ratio is pure fence overhead, not a different
     # amount of query work (a non-root owner reads all its own protected rows).
     with prot_store.snapshot(principal=owner) as ps, plain_store.snapshot() as us:
-        n_prot, n_plain = ps.count(prot_pred), us.count(plain_pred)
+        n_prot, n_plain = ps.count(prot_pred), us.count(plain_pred)  # pyright: ignore[reportArgumentType]
     assert n_prot == n_plain > 0, f"predicate shape drifted: {n_prot} vs {n_plain}"
 
     def filtered_run() -> None:
         # the protected, principal-bound discovery path: snapshot compiles the
         # readable set, intersects it before the window (ADR-008 W4)
         with prot_store.snapshot(principal=owner) as snap:
-            snap.query(prot_pred)
+            snap.query(prot_pred)  # pyright: ignore[reportArgumentType]
 
     def unfiltered_run() -> None:
         # the unprotected twin: no fence, snapshot open + query only
         with plain_store.snapshot() as snap:
-            snap.query(plain_pred)
+            snap.query(plain_pred)  # pyright: ignore[reportArgumentType]
 
     t_filtered = time_it(filtered_run, rounds=5)
     t_unfiltered = time_it(unfiltered_run, rounds=5)
